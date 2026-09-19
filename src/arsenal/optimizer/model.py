@@ -122,6 +122,21 @@ class OptimiserConfig:
     so the plan never depends on a future hit the agent would refuse to take.
     """
 
+    hit_margin: float = 3.0
+    """Extra expected points a hit must clear, beyond simply breaking even.
+
+    The -4 is **certain**; the gain that justifies it is a forecast with a wide
+    error bar. Requiring only break-even means every hit whose estimated gain
+    lands at 4.1 gets taken, and roughly half of those are really below 4.
+
+    It also prices plan decay. A gain accumulated over five gameweeks assumes the
+    player stays fit, starts, and is not repriced — assumptions that get weaker
+    the further out they reach, and that a discount factor alone does not capture.
+
+    Set to 0 to optimise on raw expected value, which is correct only if you
+    believe the forecast is unbiased and the plan will survive intact.
+    """
+
     churn_penalty: float = 0.05
     """Points charged per transfer, purely to break ties toward stability.
 
@@ -254,7 +269,9 @@ def optimise(
             terms.append(discount * value * extra * cap[i][t])
             terms.append(discount * VICE_TIEBREAK_WEIGHT * value * vice[i][t])
             terms.append(discount * bench_share * value * (squad[i][t] - start[i][t]))
-        terms.append(-HIT_COST * hits[t])
+        # Hits are charged at their real cost plus a margin of safety, so a
+        # transfer must be *clearly* worth it rather than merely break-even.
+        terms.append(-(HIT_COST + cfg.hit_margin) * hits[t])
         terms.append(FREE_TRANSFER_TIEBREAK * free[t])
 
         # Discourage pointless churn. Suppressed when a chip already makes

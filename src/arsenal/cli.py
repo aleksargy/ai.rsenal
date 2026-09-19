@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Column, Table
 
 from .cli_auth import auth_app
+from .cli_explain import explain as explain_command
 from .config import Config
 from .forecast import build_league_model, forecast_players, load_history, upcoming_fixtures
 from .forecast.backtest import backtest as run_backtest
@@ -66,6 +67,7 @@ app = typer.Typer(
 )
 console = Console()
 app.add_typer(auth_app, name="auth")
+app.command("explain")(explain_command)
 
 
 def _client(config: Config, *, gameweek: int | None = None) -> FPLClient:
@@ -373,6 +375,7 @@ def plan(
         risk_aversion=settings.risk_aversion,
         bench_weight=settings.bench_weight,
         max_hit=settings.max_hit if max_hit is None else max_hit,
+        hit_margin=settings.hit_margin,
         max_free_transfers=bootstrap.game_config.rules.max_free_transfers,
         solver_time_limit=settings.solver_time_limit,
         squad_requirements=bootstrap.squad_requirements(),

@@ -26,6 +26,18 @@ optimiser:
   # submitting.
   max_hit: 4
 
+  # Expected points a hit must clear BEYOND breaking even before it is taken.
+  #
+  # The -4 is certain; the gain justifying it is a forecast with a wide error
+  # bar. At 0, every transfer estimated to gain 4.1 points gets taken — and
+  # roughly half of those are really worth less than 4. It also prices plan
+  # decay: a gain accumulated over five gameweeks assumes the player stays fit,
+  # keeps starting, and is not repriced.
+  #
+  # Raise it to make the agent more conservative about hits; set 0 to optimise
+  # on raw expected value.
+  hit_margin: 3.0
+
   # Seconds. A timeout is a failed stage that retries on a shorter horizon,
   # never a result to be trusted.
   solver_time_limit: 60

@@ -109,6 +109,13 @@ class OptimiserSettings:
     max_hit: int = 4
     """Most points to spend on transfers. 4 is one hit; 0 disables hits entirely."""
 
+    hit_margin: float = 3.0
+    """Expected points a hit must clear beyond break-even before it is taken.
+
+    The -4 is certain; the gain justifying it is a noisy forecast. Without a
+    margin, every hit estimated at 4.1 gets taken and about half are really
+    below 4."""
+
     solver_time_limit: int = 60
     """Seconds. A timeout is a failed stage that retries with a shorter horizon."""
 

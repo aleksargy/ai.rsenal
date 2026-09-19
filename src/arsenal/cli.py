@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Column, Table
 
 from .cli_auth import auth_app
+from .cli_channels import channels as channels_command
 from .cli_explain import explain as explain_command
 from .cli_run import run as run_command
 from .cli_sources import sources as sources_command
@@ -49,6 +50,7 @@ from .research import (
     deduplicate,
     extract_claims,
     fetch_club_articles,
+    fetch_news_documents,
     fetch_reddit_documents,
     fetch_youtube_documents,
     summarise_evidence,
@@ -76,6 +78,7 @@ app.add_typer(auth_app, name="auth")
 app.command("explain")(explain_command)
 app.command("run")(run_command)
 app.command("sources")(sources_command)
+app.command("channels")(channels_command)
 
 
 def _client(config: Config, *, gameweek: int | None = None) -> FPLClient:
@@ -588,30 +591,57 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, r
     if article_problems:
         notes.append(f"[yellow]{len(article_problems)} club articles unreachable[/yellow]")
 
-    reddit_docs, reddit_error = fetch_reddit_documents(
-        config.research.subreddits,
-        client_id=config.secrets.reddit_client_id,
-        client_secret=config.secrets.reddit_client_secret,
-    )
-    if reddit_error:
-        notes.append(f"[yellow]reddit skipped[/yellow]: {reddit_error}")
-    else:
-        notes.append(f"[green]reddit[/green]: {len(reddit_docs)} documents")
-    documents.extend(reddit_docs)
+    # Free, keyless, and Tier 3 — named outlets carrying named journalists.
+    news_docs, news_problems = fetch_news_documents()
+    if news_docs:
+        notes.append(f"[green]news feeds[/green]: {len(news_docs)} relevant items")
+    for problem in news_problems:
+        notes.append(f"[yellow]feed unavailable[/yellow]: {problem}")
+    documents.extend(news_docs)
+
+    # Reddit is optional and Tier 4: it cannot move a forecast at the default
+    # threshold, and API access now sits behind a Responsible Builder Policy.
+    if config.secrets.reddit_client_id and config.secrets.reddit_client_secret:
+        reddit_docs, reddit_error = fetch_reddit_documents(
+            config.research.subreddits,
+            client_id=config.secrets.reddit_client_id,
+            client_secret=config.secrets.reddit_client_secret,
+        )
+        if reddit_error:
+            notes.append(f"[yellow]reddit skipped[/yellow]: {reddit_error}")
+        else:
+            notes.append(f"[green]reddit[/green]: {len(reddit_docs)} documents")
+        documents.extend(reddit_docs)
 
     videos, youtube_error = fetch_youtube_documents(
         config.secrets.youtube_api_key, config.research.youtube_channels
     )
     if youtube_error:
-        notes.append(f"[red]youtube failed[/red]: {youtube_error}")
-    elif videos:
+        notes.append(f"[yellow]youtube degraded[/yellow]: {youtube_error}")
+    if videos:
         notes.append(f"[green]youtube[/green]: {len(videos)} documents")
     documents.extend(videos)
 
     if documents:
+        batch_size = 8
+        requests = max(1, -(-len(documents) // batch_size))
         if not quiet:
-            console.print(f"[dim]extracting claims from {len(documents)} documents...[/dim]")
-        extracted, problems = extract_claims(backend, documents, resolver)
+            note = f"[dim]extracting from {len(documents)} documents in {requests} request(s)"
+            if backend.name == "gemini":
+                note += " — free tier is 5/min and 20/day, so this is paced"
+            console.print(note + "[/dim]")
+
+        def report(done: int, total: int, claims: int) -> None:
+            if not quiet:
+                console.print(f"  [dim]batch {done}/{total} · {claims} claims so far[/dim]")
+
+        extracted, problems = extract_claims(
+            backend,
+            documents,
+            resolver,
+            batch_size=batch_size,
+            on_progress=report,
+        )
         evidence.extend(extracted)
         notes.append(
             f"[green]extraction[/green] ({backend.name}/{backend.model}): "

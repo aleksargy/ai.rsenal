@@ -72,6 +72,7 @@ class PlayerResolver:
     _by_web: dict[str, list[int]] = field(default_factory=dict, init=False)
     _by_surname: dict[str, list[int]] = field(default_factory=dict, init=False)
     _by_id: dict[int, Element] = field(default_factory=dict, init=False)
+    _tokens_by_id: dict[int, set[str]] = field(default_factory=dict, init=False)
     _clubs: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
@@ -83,9 +84,26 @@ class PlayerResolver:
                 self._by_full.setdefault(full, []).append(element.id)
             if web:
                 self._by_web.setdefault(web, []).append(element.id)
-            surname = _tokens(element.second_name or element.web_name)
-            if surname:
-                self._by_surname.setdefault(surname[-1], []).append(element.id)
+
+            # Index **every** token of the surname, not just the last.
+            #
+            # FPL stores compound surnames in full — Ezri Konsa is "Konsa Ngoyo",
+            # Bruno Guimarães is "Guimarães Rodriguez Moura" — and the name the
+            # world actually uses is usually the *first* part. Indexing only the
+            # last token filed them under "ngoyo" and "moura", so neither
+            # resolved from prose, and the same was true of a large share of the
+            # league's Portuguese, Spanish and African names.
+            #
+            # Collisions rise as a result, but that is handled correctly
+            # elsewhere: an ambiguous match is dropped, never guessed.
+            for token in set(_tokens(element.second_name) + _tokens(element.web_name)):
+                self._by_surname.setdefault(token, []).append(element.id)
+
+            # All name tokens, for matching a multi-word name against a compound
+            # one: "Ezri Konsa" is a subset of {ezri, konsa, ngoyo}.
+            self._tokens_by_id[element.id] = set(
+                _tokens(f"{element.first_name} {element.second_name}")
+            ) | set(_tokens(element.web_name))
 
         for team_id, short_name in self.team_codes.items():
             self._clubs[normalise(short_name)] = team_id
@@ -137,6 +155,26 @@ class PlayerResolver:
                         "a club hint is required",
                         narrowed,
                     )
+
+            # No exact hit. Fall back to subset matching, which is what compound
+            # surnames need: "Ezri Konsa" never equals "Ezri Konsa Ngoyo", but
+            # its tokens are a subset of that player's, and of no other.
+            wanted = set(parts)
+            subset = [
+                element_id
+                for element_id, tokens in self._tokens_by_id.items()
+                if wanted <= tokens
+            ]
+            if subset:
+                narrowed = self._filter_by_team(subset, team_id)
+                if len(narrowed) == 1:
+                    return Resolution(narrowed[0], "name tokens")
+                return Resolution(
+                    None,
+                    f"'{name}' is ambiguous between {len(narrowed)} players; "
+                    "dropped rather than guessed",
+                    narrowed,
+                )
 
         # A bare single token is how prose usually refers to players, and it is
         # where misattribution happens. An exact web-name hit is NOT conclusive

@@ -40,6 +40,11 @@ log = logging.getLogger(__name__)
 FPL_URL = "https://fantasy.premierleague.com/"
 COOKIE_DOMAIN = "premierleague.com"
 
+# Loading an *authenticated* page is what makes the browser renew its OIDC
+# tokens. The public landing page will not, so a capture that lands there can
+# come back with a token that expired hours ago.
+MY_TEAM_URL = "https://fantasy.premierleague.com/my-team"
+
 # Cookies that have at some point carried an FPL session. A **hint for
 # diagnostics only** — never a gate.
 #
@@ -249,6 +254,19 @@ def _playwright():
     return sync_playwright
 
 
+def _read_tokens(page) -> OidcTokens | None:
+    """Read the OIDC token block from a page's localStorage.
+
+    Returns None rather than raising: a page can be mid-navigation, or simply
+    not be the origin holding the tokens, and neither is an error.
+    """
+    try:
+        entries = page.evaluate("() => Object.fromEntries(Object.entries(window.localStorage))")
+    except Exception:
+        return None
+    return OidcTokens.from_local_storage(entries or {})
+
+
 def session_from_cdp(endpoint: str = DEFAULT_CDP_ENDPOINT) -> Session:
     """Read cookies from a Chrome you are already logged into.
 
@@ -288,18 +306,34 @@ def session_from_cdp(endpoint: str = DEFAULT_CDP_ENDPOINT) -> Session:
                 if COOKIE_DOMAIN in cookie.get("domain", ""):
                     cookies[cookie["name"]] = cookie["value"]
 
-            # The OIDC tokens live in localStorage, which is readable only from
-            # an open page on the origin.
+            # The OIDC tokens live in localStorage, which the browser only exposes
+            # to a page already on that origin. Try any FPL tab that happens to
+            # be open first.
             for page in context.pages:
                 if tokens or COOKIE_DOMAIN not in page.url:
                     continue
+                tokens = _read_tokens(page)
+
+            # Nothing found, or what we found is already dead. Both need the same
+            # remedy: load FPL in a fresh tab so the browser's own OIDC client
+            # renews its tokens, then read again.
+            #
+            # Reading whatever happens to be in localStorage is not enough. A tab
+            # left open overnight holds an hour-old access token and a refresh
+            # token the browser has long since rotated away — so the capture
+            # succeeds, looks plausible, and authenticates against nothing.
+            if context.pages and (tokens is None or tokens.is_expired):
+                scratch = context.new_page()
                 try:
-                    entries = page.evaluate(
-                        "() => Object.fromEntries(Object.entries(window.localStorage))"
-                    )
-                except Exception:  # a page can be mid-navigation
-                    continue
-                tokens = OidcTokens.from_local_storage(entries or {})
+                    scratch.goto(MY_TEAM_URL, wait_until="networkidle", timeout=45_000)
+                    renewed = _read_tokens(scratch)
+                    if (renewed and not renewed.is_expired) or (renewed and tokens is None):
+                        tokens = renewed
+                except Exception as exc:  # a navigation can fail for many reasons
+                    log.info("could not refresh tokens via a new FPL tab: %s", exc)
+                finally:
+                    with contextlib.suppress(Exception):
+                        scratch.close()
 
         browser.close()
 
@@ -309,6 +343,21 @@ def session_from_cdp(endpoint: str = DEFAULT_CDP_ENDPOINT) -> Session:
             "attached, but found no premierleague.com cookies or tokens at all.\n"
             "Open https://fantasy.premierleague.com/my-team in that browser, "
             "confirm your squad is visible, and try again."
+        )
+    if session.tokens.access_token and session.tokens.is_expired:
+        # Captured, but already dead — and loading My Team did not renew it,
+        # which means the browser's own session has lapsed. Saving this would
+        # hand back a credential that authenticates against nothing.
+        raise RuntimeError(
+            "the browser is holding an expired session.\n\n"
+            "Its stored token has lapsed and loading My Team did not renew it, "
+            "so the browser itself is no longer signed in.\n\n"
+            "In that browser window:\n"
+            "  1. Open https://fantasy.premierleague.com/my-team\n"
+            "  2. Sign in again if prompted, and confirm your squad is visible\n"
+            "  3. Re-run `arsenal auth attach` straight away\n\n"
+            "Capture soon after signing in — the browser rotates its own tokens, "
+            "and a tab left open holds one that has already been superseded."
         )
     # Deliberately no cookie-name gate. `pl_profile` and `sessionid` are gone
     # this season and `ST`/`ST-NO-SS` replaced them with no announcement, so

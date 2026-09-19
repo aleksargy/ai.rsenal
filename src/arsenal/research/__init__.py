@@ -23,11 +23,13 @@ from .evidence import (
     may_adjust_forecast,
 )
 from .extract import build_client, extract_claims, summarise_evidence
+from .newsfeeds import DEFAULT_FEEDS, fetch_news_documents, is_relevant
 from .providers import AnthropicBackend, ExtractionBackend, GeminiBackend, build_backend
 from .resolver import PlayerResolver, Resolution, normalise, resolve_all
 from .sources import Document, FPLNewsSource, SetPieceSource, SourceResult
 
 __all__ = [
+    "DEFAULT_FEEDS",
     "Adjustment",
     "AnthropicBackend",
     "ClubArticle",
@@ -54,9 +56,11 @@ __all__ = [
     "deduplicate",
     "extract_claims",
     "fetch_club_articles",
+    "fetch_news_documents",
     "fetch_reddit_documents",
     "fetch_youtube_documents",
     "html_to_text",
+    "is_relevant",
     "may_adjust_forecast",
     "normalise",
     "resolve_all",

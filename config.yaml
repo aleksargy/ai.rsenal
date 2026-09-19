@@ -56,9 +56,13 @@ research:
   min_sources: 2
 
   # How far down the source tiers a claim may still change a number.
-  #   3 = official data, measured stats, and reported claims (default)
-  #   4 = also lets unattributed creator/community opinion count, at roughly
-  #       half a reporter's weight
+  #   3 = official data, measured stats, and reported claims only
+  #   4 = also lets FPL creator and community opinion count (default)
+  #
+  # Tier 4 is weighted by what the claim asserts, not flatly. An FPL analyst's
+  # JUDGEMENT about rotation risk or a role change counts for much more than the
+  # same person relaying a FACT the club already announced - because on the
+  # former they are the specialist, and on the latter they are downstream.
   #
   # Narrower than it sounds: a creator who ATTRIBUTES a claim to a press
   # conference is already promoted to Tier 3 and counts either way. Only pure
@@ -67,7 +71,7 @@ research:
   # The default is a starting position, not a verdict - we hold no track record
   # for any individual source, so "expert" is an assertion until measured. Set
   # it to 4, re-run `arsenal backtest`, and let the numbers decide.
-  max_tier_that_moves_forecast: 3
+  max_tier_that_moves_forecast: 4
 
   # Which provider extracts claims: auto | anthropic | gemini
   #   auto     prefers Anthropic for quality, falls back to Gemini
@@ -89,10 +93,20 @@ research:
   subreddits:
     - FantasyPL
 
-  # YouTube channel ids to pull transcripts from. Tier 4: useful for surfacing
-  # claims to verify and for reading the field, never for moving an xP number
-  # on its own.
-  youtube_channels: []
+  # YouTube channel ids to pull transcripts from. Find more with
+  # `arsenal channels "<name>"`.
+  #
+  # Tier 4, but weighted by what the claim asserts: a specialist's JUDGEMENT
+  # about rotation risk or a role change carries real weight, because that is
+  # their expertise. The same person relaying a FACT the club already announced
+  # does not, because there they are simply downstream of the announcement.
+  youtube_channels:
+    - UCxeOc7eFxq37yW_Nc-69deA  # Let's Talk FPL
+    - UCcPWnCj5AKC19HaySZjb25g  # FPL Harry
+    - UCweDAlFm2LnVcOqaFU4_AGA  # FPL Mate
+    - UCKxYKQ8pgJ7V8wwh4hLsSXQ  # Fantasy Football Scout
+    - UC72QokPHXQ9r98ROfNZmaDw  # FPL Focal
+    - UC8043oOKTB4uP8Nq15Kz6bg  # Planet FPL
 
 schedule:
   # All relative to the gameweek deadline, never a fixed clock time — deadlines

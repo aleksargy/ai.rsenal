@@ -14,6 +14,7 @@ checkable assertion.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
@@ -62,6 +63,10 @@ Rules:
    - fixture: schedule, congestion, opponent
 7. Skip opinion with no factual content. "He's a great differential" and "I'm
    captaining him" are not claims. "He is expected to start against Spurs" is.
+8. You may be given SEVERAL documents in one message, each introduced by a
+   `=== DOCUMENT n ===` marker. Set `document` to that number on every claim, so
+   each one stays traceable to the source it came from. Never merge documents or
+   carry context between them.
 
 Be conservative. A missed claim costs nothing. A fabricated one costs points."""
 
@@ -69,6 +74,9 @@ Be conservative. A missed claim costs nothing. A fabricated one costs points."""
 class ExtractedClaim(BaseModel):
     """One claim as the model read it, before resolution."""
 
+    document: int = Field(
+        default=1, description="1-based number of the document this claim came from"
+    )
     player_name: str = Field(description="Player name exactly as written in the text")
     club: str = Field(default="", description="Club name or code, if the text gives one")
     claim: str = Field(description="One single factual assertion, stated plainly")
@@ -86,6 +94,11 @@ class ExtractionResult(BaseModel):
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
 
+# Two failed batches in a row means the provider is down or out of quota, not
+# that these documents were awkward. Stopping keeps a doomed run from spending
+# minutes of backoff per remaining batch.
+GIVE_UP_AFTER = 2
+
 VALID_IMPACTS: frozenset[str] = frozenset(
     {"availability", "minutes", "role", "set_pieces", "form", "fixture", "price"}
 )
@@ -97,6 +110,8 @@ def extract_claims(
     resolver: PlayerResolver,
     *,
     max_documents: int = 60,
+    batch_size: int = 8,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> tuple[list[Evidence], list[str]]:
     """Extract evidence from documents.
 
@@ -107,30 +122,73 @@ def extract_claims(
     ``backend`` is whichever model provider is configured — Anthropic or Gemini.
     Nothing below this line knows which, because the job is the same either way:
     read prose, emit checkable claims.
+
+    Documents are sent several per request. That is not an optimisation: Gemini's
+    free tier allows only 20 requests per day per model, so one-per-document
+    would exhaust nearly three days of quota on a single run. Batching turns ~55
+    articles into ~7 requests. Each document is delimited and numbered so every
+    claim stays traceable to its source.
     """
     evidence: list[Evidence] = []
     problems: list[str] = []
     promoted = 0
 
-    for document in documents[:max_documents]:
-        prompt = (
-            f"Source: {document.source_name}\n"
-            f"Published: {document.published_at:%Y-%m-%d}\n\n"
-            f"{document.text}"
+    selected = documents[:max_documents]
+    batches = [selected[i : i + batch_size] for i in range(0, len(selected), batch_size)]
+    log.info("extracting from %d documents in %d requests", len(selected), len(batches))
+
+    # A batch that fails after exhausting every fallback model means the quota or
+    # the service is gone, not that this particular batch was unlucky. Grinding
+    # through the remaining batches would add minutes of backoff to learn the
+    # same thing, so the run gives up and reports what it has.
+    consecutive_failures = 0
+
+    for number, batch in enumerate(batches, start=1):
+        prompt = "\n\n".join(
+            f"=== DOCUMENT {n} ===\n"
+            f"Source: {doc.source_name}\n"
+            f"Published: {doc.published_at:%Y-%m-%d}\n\n"
+            f"{doc.text}"
+            for n, doc in enumerate(batch, start=1)
         )
+        label = f"{len(batch)} documents from {batch[0].source_name}"
         try:
             raw_claims = backend.extract(EXTRACTION_SYSTEM, prompt)
-        except Exception as exc:  # one bad document must not end the run
-            problems.append(f"{document.url}: {exc}")
-            log.warning("extraction failed for %s: %s", document.url, exc)
+        except Exception as exc:  # one bad batch must not end the run
+            problems.append(f"{label}: {exc}")
+            log.warning("extraction failed for %s: %s", label, exc)
+            consecutive_failures += 1
+            if consecutive_failures >= GIVE_UP_AFTER:
+                problems.append(
+                    f"gave up after {consecutive_failures} consecutive failures — "
+                    "the model provider is unavailable or out of quota"
+                )
+                break
+            if on_progress:
+                on_progress(number, len(batches), len(evidence))
             continue
+
+        consecutive_failures = 0
 
         for raw in raw_claims:
             try:
                 claim = ExtractedClaim.model_validate(raw)
             except Exception as exc:
-                problems.append(f"{document.url}: malformed claim ({exc})")
+                problems.append(f"{label}: malformed claim ({exc})")
                 continue
+
+            # Map the claim back to the document it came from. An out-of-range
+            # index means the model lost track across the batch, and attributing
+            # the claim to the wrong article would give it the wrong source, the
+            # wrong tier and the wrong date - so it is dropped.
+            index = claim.document - 1
+            if not 0 <= index < len(batch):
+                problems.append(
+                    f"{label}: claim cited document {claim.document}, "
+                    "which is not in this batch"
+                )
+                continue
+            document = batch[index]
 
             if claim.impact not in VALID_IMPACTS:
                 problems.append(f"{document.url}: unknown impact {claim.impact!r}")
@@ -171,6 +229,9 @@ def extract_claims(
                     hedged=claim.hedged,
                 )
             )
+
+        if on_progress:
+            on_progress(number, len(batches), len(evidence))
 
     if promoted:
         log.info("promoted %d claims to Tier 3 by attribution", promoted)

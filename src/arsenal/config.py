@@ -133,12 +133,13 @@ class ResearchSettings:
     min_sources: int = 2
     """Below this many working adapters, abort rather than forecast on thin evidence."""
 
-    max_tier_that_moves_forecast: int = 3
+    max_tier_that_moves_forecast: int = 4
     """How far down the source tiers a claim may still change a number.
 
-    3 (default) means official data, measured stats and reported claims count,
-    while unattributed opinion does not. 4 admits creator and community opinion
-    too, at roughly half a reporter's weight.
+    4 (default) admits FPL creator and community opinion. It is weighted by what
+    the claim asserts rather than flatly: a specialist's *judgement* about
+    rotation or role counts for much more than their relaying of a *fact* the
+    club already announced.
 
     Narrower than it sounds: a creator who *attributes* a claim to a press
     conference is already promoted to Tier 3 and counts either way. Only pure

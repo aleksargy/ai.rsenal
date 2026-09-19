@@ -167,6 +167,7 @@ def fetch_youtube_documents(
 
     published_after = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
     documents: list[Document] = []
+    blocked: str | None = None
     try:
         with httpx.Client(timeout=20.0) as client:
             for channel_id in channel_ids:
@@ -190,10 +191,14 @@ def fetch_youtube_documents(
                         continue
 
                     body = f"{snippet.get('title', '')}\n\n{snippet.get('description', '')}"
-                    if with_transcripts:
-                        transcript = _transcript(video_id)
+                    if with_transcripts and not blocked:
+                        transcript, problem = _transcript(video_id)
                         if transcript:
                             body = f"{snippet.get('title', '')}\n\n{transcript}"
+                        elif problem:
+                            # One block means every later request is blocked too;
+                            # continuing would just be slow.
+                            blocked = problem
 
                     documents.append(
                         Document(
@@ -210,23 +215,39 @@ def fetch_youtube_documents(
         log.warning("youtube fetch failed: %s", exc)
         return documents, str(exc)
 
-    return documents, None
+    # Titles and descriptions without transcripts are around 120 characters of
+    # promotional text. Saying so is more useful than quietly adding noise.
+    return documents, blocked
 
 
-def _transcript(video_id: str) -> str | None:
-    """Fetch a video transcript, if the optional dependency is installed.
+def _transcript(video_id: str) -> tuple[str | None, str | None]:
+    """Fetch a video transcript. Returns ``(text, problem)``.
 
-    Returns None rather than raising: a video without captions is common, and it
-    should cost that video's transcript and nothing else.
+    The problem is returned rather than swallowed because the difference between
+    "this video has no captions" and "YouTube has blocked us" matters enormously,
+    and both previously degraded to a 122-character description with no signal
+    that anything had gone wrong.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
-        return None
+        return None, "youtube-transcript-api is not installed"
 
     try:
         fetched = YouTubeTranscriptApi().fetch(video_id, languages=["en", "en-GB", "en-US"])
-        return " ".join(chunk.text for chunk in fetched)
-    except Exception as exc:  # the library raises many distinct errors
+        return " ".join(chunk.text for chunk in fetched), None
+    except Exception as exc:  # the library raises many distinct error types
+        kind = type(exc).__name__
+        if "IpBlocked" in kind or "TooManyRequests" in kind:
+            # Terminal for this run and every video in it. YouTube blocks the
+            # whole IP, and it blocks cloud-provider ranges by default — so a
+            # scheduled agent on hosted CI will never see a transcript.
+            return None, (
+                "YouTube has blocked this IP from transcript requests. It rate "
+                "limits scraping aggressively and blocks cloud providers by "
+                "default, so transcripts are unreliable here and unavailable "
+                "from hosted CI. Video titles and descriptions still work, but "
+                "carry very little signal."
+            )
         log.debug("no transcript for %s: %s", video_id, exc)
-        return None
+        return None, None

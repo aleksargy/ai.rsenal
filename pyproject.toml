@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 agents = ["anthropic>=0.40"]
+# Gemini needs no SDK - it is reached over REST with the httpx already here.
+youtube = ["youtube-transcript-api>=1.0"]
 browser = ["playwright>=1.49"]
 dev = ["pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8", "mypy>=1.13", "respx>=0.22"]
 

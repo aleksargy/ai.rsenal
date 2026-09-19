@@ -38,13 +38,49 @@ TIER_AUTHORITY: dict[Tier, float] = {
     Tier.REPORTED: 0.45,
     Tier.OPINION: 0.20,
 }
-"""How much a single claim of each tier may scale availability.
+"""Base authority per tier, before the claim type is considered.
 
-Tier 4 carries a real but deliberately small weight, roughly half a reporter's.
-It only applies when ``max_tier`` is raised to admit opinion at all; at the
-default it is gated out before this table is consulted. The two controls are
-separate on purpose: *whether* a tier counts is policy, *how much* it counts is
-a property of the tier."""
+Tiers measure *distance from ground truth*, which is the right axis for facts:
+a club statement beats a reporter, who beats someone repeating the reporter."""
+
+
+# Distance from ground truth is not the only thing that matters, and treating it
+# as such under-rated exactly the sources worth having.
+#
+# A claim splits into two kinds:
+#
+#   A FACT the source is relaying - "he is injured". Proximity decides: the club
+#   knows, the journalist at the press conference heard it, and a creator
+#   repeating it adds nothing the original did not already have.
+#
+#   A JUDGEMENT the source is making - "he is a rotation risk", "that role change
+#   matters", "the fixture swing is real". Here specialism decides, and an FPL
+#   analyst who thinks about nothing else is a better source than a match
+#   reporter who never considers rotation in fantasy terms at all.
+#
+# So judgement-shaped impacts lift the lower tiers toward the higher ones, while
+# factual impacts leave the ordering alone. A creator is still not a substitute
+# for a club announcement about an injury - but on whether a fit player will
+# actually start, they may well be the better read.
+SPECIALIST_IMPACTS: frozenset[str] = frozenset({"minutes", "role", "fixture", "form"})
+
+# How far a specialist claim closes the gap to the tier above it.
+SPECIALIST_LIFT = 0.6
+
+
+def authority_for(evidence: Evidence) -> float:
+    """How much this specific claim may move availability.
+
+    Combines where the source sits (tier) with what it is actually asserting.
+    """
+    base = TIER_AUTHORITY[evidence.tier]
+    if evidence.impact not in SPECIALIST_IMPACTS:
+        return base
+
+    # Lift toward the tier above, which is where domain expertise earns its keep.
+    stronger = TIER_AUTHORITY.get(Tier(max(int(evidence.tier) - 1, 1)), base)
+    return base + (stronger - base) * SPECIALIST_LIFT
+
 
 # Floor on any downgrade from a single piece of evidence, so one misread
 # sentence cannot zero out a player the statistics say is nailed.
@@ -121,7 +157,7 @@ def _direction(evidence: Evidence) -> float:
 
 def _multiplier_for(evidence: Evidence) -> float:
     """The availability multiplier a single claim implies."""
-    authority = TIER_AUTHORITY[evidence.tier]
+    authority = authority_for(evidence)
     if authority == 0.0:
         return 1.0
 

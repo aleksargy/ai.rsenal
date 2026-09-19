@@ -556,3 +556,116 @@ class TestNoStalePropertyAccess:
         assert not offenders, "these look like methods used as properties: " + ", ".join(
             offenders
         )
+
+
+class TestCompoundSurnames:
+    """FPL stores surnames in full; the world uses a fragment.
+
+    Ezri Konsa is "Konsa Ngoyo" and Bruno Guimarães is "Guimarães Rodriguez
+    Moura". Indexing only the last token filed them under "ngoyo" and "moura",
+    so neither resolved from prose — and the same was true of a large share of
+    the league's Portuguese, Spanish and African names. Real press-conference
+    claims about both were being dropped.
+    """
+
+    def resolver(self) -> PlayerResolver:
+        return PlayerResolver(
+            elements=[
+                make_element(1, "Ezri", "Konsa Ngoyo", "Konsa", team=1),
+                make_element(2, "Bruno", "Guimarães Rodriguez Moura", "Bruno G.", team=2),
+                make_element(3, "Bukayo", "Saka", "Saka", team=1),
+                # Two players who collide on a shared first surname token.
+                make_element(4, "Joao", "Silva Santos", "J.Silva", team=3),
+                make_element(5, "Bernardo", "Silva Costa", "B.Silva", team=4),
+            ],
+            team_codes={1: "ARS", 2: "NEW", 3: "MUN", 4: "MCI"},
+        )
+
+    def test_resolves_the_first_token_of_a_compound_surname(self) -> None:
+        assert self.resolver().resolve("Konsa").element_id == 1
+        assert self.resolver().resolve("Guimaraes").element_id == 2
+
+    def test_resolves_a_partial_full_name(self) -> None:
+        """ "Ezri Konsa" never equals "Ezri Konsa Ngoyo", but its tokens are a subset."""
+        assert self.resolver().resolve("Ezri Konsa").element_id == 1
+        assert self.resolver().resolve("Bruno Guimaraes").element_id == 2
+
+    def test_accents_still_fold(self) -> None:
+        assert self.resolver().resolve("Bruno Guimarães").element_id == 2
+
+    def test_a_simple_surname_is_unaffected(self) -> None:
+        assert self.resolver().resolve("Saka").element_id == 3
+
+    def test_shared_compound_tokens_stay_ambiguous(self) -> None:
+        """Wider indexing must not buy recall at the cost of misattribution."""
+        outcome = self.resolver().resolve("Silva")
+        assert outcome.resolved is False
+        assert sorted(outcome.candidates) == [4, 5]
+
+    def test_a_club_hint_still_disambiguates(self) -> None:
+        assert self.resolver().resolve("Silva", team_id=4).element_id == 5
+
+    def test_forename_disambiguates_a_shared_compound(self) -> None:
+        assert self.resolver().resolve("Bernardo Silva").element_id == 5
+
+
+class TestSpecialistJudgement:
+    """Weight by what a claim asserts, not only by how close the source is.
+
+    Tiers measure distance from ground truth, which is right for facts: the club
+    knows whether a player is injured, and a creator repeating it adds nothing.
+    But for FPL-specific *judgement* - rotation risk, whether a role change
+    matters - the specialist who thinks about nothing else is a better source
+    than a match reporter who never considers it. A flat tier weight under-rated
+    exactly the sources worth having.
+    """
+
+    def claim(self, tier: Tier, impact: str) -> Evidence:
+        return make_evidence(tier=tier, impact=impact, claim="Rotation risk this week")
+
+    def test_facts_still_rank_by_proximity(self) -> None:
+        from arsenal.research.apply import authority_for
+
+        official = authority_for(self.claim(Tier.FACT, "availability"))
+        reporter = authority_for(self.claim(Tier.REPORTED, "availability"))
+        creator = authority_for(self.claim(Tier.OPINION, "availability"))
+        assert official > reporter > creator
+
+    def test_judgement_lifts_the_specialist(self) -> None:
+        """A creator on rotation risk counts for far more than on an injury."""
+        from arsenal.research.apply import authority_for
+
+        on_a_fact = authority_for(self.claim(Tier.OPINION, "availability"))
+        on_judgement = authority_for(self.claim(Tier.OPINION, "minutes"))
+        assert on_judgement > on_a_fact
+
+    def test_judgement_never_overtakes_official_data(self) -> None:
+        """An FPL analyst's read must not outrank a club announcement."""
+        from arsenal.research.apply import authority_for
+
+        creator = authority_for(self.claim(Tier.OPINION, "minutes"))
+        official = authority_for(self.claim(Tier.FACT, "availability"))
+        assert creator < official
+
+    def test_tier_one_is_unaffected_by_impact(self) -> None:
+        """Official data is already ground truth; specialism adds nothing to it."""
+        from arsenal.research.apply import authority_for
+
+        assert authority_for(self.claim(Tier.FACT, "availability")) == authority_for(
+            self.claim(Tier.FACT, "minutes")
+        )
+
+    def test_creator_judgement_moves_a_forecast(self) -> None:
+        """The whole point: a specialist's read on minutes now changes something."""
+        report = build_report(
+            [
+                make_evidence(
+                    tier=Tier.OPINION,
+                    impact="minutes",
+                    claim="Expected to be rested, will miss the match",
+                )
+            ],
+            now=NOW,
+            max_tier=Tier.OPINION,
+        )
+        assert report.adjustments[1].availability_multiplier < 1.0

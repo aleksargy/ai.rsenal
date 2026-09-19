@@ -146,8 +146,14 @@ def _persist(session: Session, team_id: int | None, *, quiet: bool = False) -> N
             "  [dim]uv run arsenal auth whoami <id>[/dim]   to confirm it\n"
             "  [dim]uv run arsenal auth check[/dim]          to verify the session"
         )
-    else:
-        console.print("\nrun [dim]uv run arsenal auth check[/dim] to verify it authenticates")
+
+    if session.tokens.refresh_token:
+        console.print(
+            "\n[bold]The agent now owns this login.[/bold] Refreshing advances a "
+            "single shared chain, so from here:\n"
+            "  · log out of FPL in that browser, and do not use it for FPL again\n"
+            "  · do not re-run `attach` unless the agent's session actually breaks"
+        )
 
 
 @auth_app.command("login")
@@ -179,6 +185,9 @@ def auth_attach(
     endpoint: Annotated[
         str, typer.Option("--endpoint", help="Chrome DevTools endpoint")
     ] = DEFAULT_CDP_ENDPOINT,
+    force: Annotated[
+        bool, typer.Option("--force", help="Replace a session you already hold")
+    ] = False,
 ) -> None:
     """Read the session from a Chrome you are already logged into.
 
@@ -193,6 +202,29 @@ def auth_attach(
     Log into FPL in that window, then run this.
     """
     config = Config.load()
+
+    # There is exactly one refresh-token chain per login, and refreshing it
+    # advances that chain for everyone holding a copy. So when the agent already
+    # has a live session, importing the browser's copy replaces a working token
+    # with one the provider has already revoked — a capture that reports success
+    # and then fails on the next refresh.
+    existing = load_session(config)
+    if (
+        not force
+        and existing is not None
+        and existing.tokens.refresh_token
+        and not existing.tokens.is_expired
+    ):
+        console.print(
+            "[yellow]you already hold a live session — not overwriting it.[/yellow]\n\n"
+            "Refreshing advances a single shared chain, so whichever side "
+            "refreshed last invalidated the other's copy. Re-capturing now would "
+            "import the browser's stale token and break a session that works.\n\n"
+            "  · `arsenal auth check` to confirm what you have\n"
+            "  · `--force` if the browser has genuinely signed in again since"
+        )
+        raise typer.Exit(0)
+
     try:
         session = session_from_cdp(endpoint)
     except RuntimeError as exc:
@@ -407,6 +439,8 @@ def auth_refresh(
             client_id=session.tokens.client_id,
         )
 
+    previous_refresh = session.tokens.refresh_token
+
     try:
         session, refreshed = refresh_if_needed(session)
     except TokenError as exc:
@@ -423,4 +457,23 @@ def auth_refresh(
         f"[green]refreshed[/green] — new access token valid for {minutes:.0f} minutes"
     )
     console.print("[dim]saved to session.json and .env[/dim]")
+
+    # Whether the provider rotates refresh tokens decides the whole CI design.
+    # If it rotates, every automated run must write the new one back to wherever
+    # the secret lives, or the following run authenticates with a dead token.
+    if session.tokens.refresh_token != previous_refresh:
+        console.print(
+            "\n[yellow]the refresh token rotated[/yellow] — the provider issues a "
+            "new one on each use.\n"
+            "[dim]Automated runs must persist it after every refresh, or the next "
+            "run starts with a revoked token.[/dim]"
+        )
+    else:
+        console.print(
+            "\n[green]the refresh token is stable[/green] — the same one survives "
+            "a refresh.\n"
+            "[dim]That makes CI simple: store it once as a secret and let each run "
+            "mint its own access token.[/dim]"
+        )
+
     _verify(session, config.secrets.team_id)

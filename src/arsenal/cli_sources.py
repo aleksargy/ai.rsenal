@@ -7,6 +7,8 @@ source, whether it is ready, and exactly what to do about the ones that are not.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import typer
 from rich.console import Console
 from rich.table import Column, Table
@@ -41,7 +43,11 @@ def _cost(model: str) -> tuple[float, float]:
     return per_run, per_run * RUNS_PER_GAMEWEEK * GAMEWEEKS
 
 
-def sources() -> None:
+def sources(
+    test: Annotated[
+        bool, typer.Option("--test", help="Make one live call to prove extraction works")
+    ] = False,
+) -> None:
     """Show which research sources are configured and what is missing."""
     config = Config.load()
     secrets = config.secrets
@@ -76,7 +82,14 @@ def sources() -> None:
             "needs ANTHROPIC_API_KEY or GEMINI_API_KEY (free) to read the prose",
         ),
         (
-            "Reddit r/FantasyPL",
+            "Football news feeds",
+            "3",
+            bool(secrets.anthropic_api_key or secrets.gemini_api_key),
+            "BBC, Guardian, Sky team news",
+            "needs a model key to read the prose; the feeds themselves are free",
+        ),
+        (
+            "Reddit (optional)",
             "4",
             bool(secrets.reddit_client_id and secrets.reddit_client_secret)
             and bool(secrets.anthropic_api_key or secrets.gemini_api_key),
@@ -148,13 +161,78 @@ def sources() -> None:
         "default.[/dim]"
     )
 
+    if test:
+        _test_extraction(backend)
+
+
+def _test_extraction(backend) -> None:
+    """Prove the model backend works by extracting from a known passage.
+
+    "It ran without erroring" is not the same as "it understood the text", so
+    this uses a passage with a known answer: one firm claim, one hedged one, both
+    attributed. If hedging is lost the extraction is not trustworthy, because
+    "should be fit" and "is fit" carry very different weight downstream.
+    """
+    from .research.extract import EXTRACTION_SYSTEM
+
+    if backend is None:
+        console.print(
+            "\n[yellow]no model configured[/yellow] — set ANTHROPIC_API_KEY or "
+            "GEMINI_API_KEY to test extraction."
+        )
+        return
+
+    passage = (
+        "=== DOCUMENT 1 ===\n"
+        "Source: Test FC official site\n"
+        "Published: 2026-09-19\n\n"
+        "Manager Pep Guardiola confirmed that Erling Haaland will miss Saturday's "
+        "match with a hamstring injury. He added that Phil Foden should be "
+        "available, though a late fitness test is planned."
+    )
+
+    console.print(f"\n[bold]Testing extraction[/bold] with {backend.name}/{backend.model}...")
+    try:
+        claims = backend.extract(EXTRACTION_SYSTEM, passage)
+    except Exception as exc:
+        console.print(f"[red]failed[/red]: {str(exc)[:200]}")
+        return
+
+    if not claims:
+        console.print("[yellow]returned no claims[/yellow] — the passage contains two.")
+        return
+
+    table = Table("player", "claim", "hedged", "attributed to")
+    for claim in claims:
+        table.add_row(
+            claim.get("player_name", "?"),
+            claim.get("claim", "")[:46],
+            "yes" if claim.get("hedged") else "no",
+            claim.get("attributed_to", "") or "[dim]—[/dim]",
+        )
+    console.print(table)
+
+    hedges = {bool(c.get("hedged")) for c in claims}
+    attributed = any(c.get("attributed_to") for c in claims)
+    if hedges == {True, False} and attributed:
+        console.print(
+            "[green]working[/green] — it separated the firm claim from the hedged "
+            "one and kept the attribution, which is what promotes a claim to Tier 3."
+        )
+    else:
+        console.print(
+            "[yellow]working, but imprecise[/yellow] — it should mark Haaland firm, "
+            "Foden hedged, and attribute both to Guardiola. Consider a stronger model."
+        )
+
 
 def _reddit_hint(secrets) -> str:
     if not secrets.reddit_client_id or not secrets.reddit_client_secret:
         return (
-            "anonymous access returns 403. Create a 'script' app at "
-            "https://www.reddit.com/prefs/apps (free), then set REDDIT_CLIENT_ID "
-            "and REDDIT_CLIENT_SECRET"
+            "API access now sits behind Reddit's Responsible Builder Policy and "
+            "is no longer reliably self-serve. Skip it — it is Tier 4 and cannot "
+            "move a forecast at the default threshold. The news feeds above cover "
+            "the same ground at Tier 3."
         )
     if not (secrets.anthropic_api_key or secrets.gemini_api_key):
         return "credentials present, but reading the posts needs a model key"

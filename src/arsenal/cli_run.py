@@ -236,6 +236,15 @@ def run(
         hit_margin=settings.hit_margin,
     )
 
+    _drivers(
+        decision=decision,
+        report=report,
+        elements=elements,
+        teams=teams,
+        forecasts=forecasts,
+        owned={pick.element for pick in my_team.picks},
+    )
+
     console.print(
         f"\n[bold green]DRY RUN[/bold green] — nothing was submitted. "
         f"Completed in {(datetime.now(UTC) - started).total_seconds():.0f}s."
@@ -352,3 +361,103 @@ def _summary(
         f"bank {format_money(decision.bank)} · "
         f"submitting at T−{max(deadline_hours - 1.5, 0):.0f}h"
     )
+
+
+def _drivers(*, decision, report, elements, teams, forecasts, owned: set[int]) -> None:
+    """What actually moved the answer, separated from what merely happened.
+
+    431 evidence records adjusted 201 players, but only a handful bear on the
+    squad that was chosen. Reporting all of them is noise; reporting none leaves
+    a recommendation you cannot interrogate. This shows the evidence attached to
+    players entering, leaving, or starting — and says plainly when a decision
+    rested on statistics alone, because "no team news" is itself worth knowing.
+    """
+
+    def name(element_id: int) -> str:
+        element = elements.get(element_id)
+        if element is None:
+            return str(element_id)
+        club = teams[element.team].short_name if element.team in teams else "?"
+        return f"{element.name} ({club})"
+
+    console.rule("[bold]why")
+
+    relevant = set(decision.transfers_in) | set(decision.transfers_out) | set(decision.starting)
+    moved = [
+        adjustment
+        for player_id, adjustment in report.adjustments.items()
+        if player_id in relevant and adjustment.changed
+    ]
+
+    # Transfers first — these are the decisions that cost something.
+    for label, players in (
+        ("[red]OUT[/red]", decision.transfers_out),
+        ("[green]IN[/green]", decision.transfers_in),
+    ):
+        for player_id in players:
+            adjustment = report.adjustments.get(player_id)
+            console.print(f"\n  {label} [bold]{name(player_id)}[/bold]")
+            if adjustment and adjustment.reasons:
+                for reason in adjustment.reasons[:3]:
+                    console.print(f"      {reason}")
+            else:
+                # An honest and common answer. Most transfers are driven by the
+                # forecast, not by news, and pretending otherwise would invent a
+                # narrative the model never used.
+                console.print(
+                    "      [dim]no team news — chosen on form, fixtures and "
+                    "expected minutes[/dim]"
+                )
+
+    # Then anyone in the XI whose forecast the news changed.
+    starters_moved = [
+        adjustment
+        for adjustment in moved
+        if adjustment.player_id in decision.starting
+        and adjustment.player_id not in decision.transfers_in
+    ]
+    if starters_moved:
+        console.print("\n  [bold]team news affecting your XI[/bold]")
+        for adjustment in sorted(starters_moved, key=lambda a: a.availability_multiplier)[:5]:
+            console.print(f"    {name(adjustment.player_id)}")
+            for reason in adjustment.reasons[:2]:
+                console.print(f"      {reason}")
+
+    # Evidence that downgraded someone you own but did not act on — the most
+    # decision-relevant thing the agent can surface, because it is the case where
+    # it might be wrong to hold.
+    held_down = [
+        adjustment
+        for player_id, adjustment in report.adjustments.items()
+        if player_id in owned
+        and player_id not in decision.transfers_out
+        and adjustment.availability_multiplier < 0.7
+    ]
+    if held_down:
+        console.print("\n  [yellow]owned but flagged, and not transferred[/yellow]")
+        for adjustment in sorted(held_down, key=lambda a: a.availability_multiplier)[:5]:
+            console.print(
+                f"    {name(adjustment.player_id)} "
+                f"[dim]availability x{adjustment.availability_multiplier:.2f}[/dim]"
+            )
+            for reason in adjustment.reasons[:1]:
+                console.print(f"      {reason}")
+
+    if report.conflicts:
+        affected = {
+            first.player_id for first, _ in report.conflicts if first.player_id in relevant
+        }
+        if affected:
+            plural = "player has" if len(affected) == 1 else "players have"
+            console.print(
+                f"\n  [yellow]{len(affected)} of your {plural} sources that "
+                "disagree[/yellow] — uncertainty widened rather than a side picked"
+            )
+            for player_id in list(affected)[:3]:
+                console.print(f"    {name(player_id)}")
+
+    if not moved and not held_down:
+        console.print(
+            "\n  [dim]No team news changed any player in this squad. The "
+            "decision rests entirely on the statistical forecast.[/dim]"
+        )

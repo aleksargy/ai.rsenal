@@ -30,6 +30,19 @@ from .optimizer import (
     candidates_from_forecasts,
     optimise,
 )
+from .research import (
+    FPLNewsSource,
+    PlayerResolver,
+    SetPieceSource,
+    apply_to_forecasts,
+    build_client,
+    build_report,
+    deduplicate,
+    extract_claims,
+    fetch_reddit_documents,
+    fetch_youtube_documents,
+    summarise_evidence,
+)
 
 app = typer.Typer(
     name="arsenal",
@@ -290,6 +303,12 @@ def plan(
     max_hit: Annotated[
         int | None, typer.Option("--max-hit", help="Points spendable on hits")
     ] = None,
+    research: Annotated[
+        bool, typer.Option("--research/--no-research", help="Apply team news")
+    ] = True,
+    llm: Annotated[
+        bool, typer.Option("--llm/--no-llm", help="Extract claims with Claude")
+    ] = False,
 ) -> None:
     """Solve for the best squad and print the proposed gameweek.
 
@@ -354,6 +373,15 @@ def plan(
         forecasts = forecast_players(
             bootstrap, history, league, schedule, horizon=opt_config.horizon
         )
+        if research:
+            _, evidence, notes = _gather_evidence(config, bootstrap, use_llm=llm, quiet=True)
+            report = build_report(evidence)
+            apply_to_forecasts(forecasts, report)
+            changed = len(report.changed_players)
+            for note in notes:
+                console.print(f"  {note}")
+            console.print(f"  [green]research[/green]: {changed} players adjusted\n")
+
         candidates = candidates_from_forecasts(bootstrap, forecasts, my_team=my_team)
         source = f"{len(history.gameweeks)} completed GW"
     else:
@@ -468,10 +496,131 @@ def plan(
         console.print(f"[yellow]warn[/yellow] {warning}")
 
     console.print(
-        "\n[dim]Expected points are model output, not research: no press "
-        "conferences, creator claims or community signal feed this yet. "
-        "Run `arsenal backtest` to see how it scores.[/dim]"
+        "\n[dim]Tier 1 team news is applied. Press conferences and community "
+        "signal need --llm and an Anthropic key; Tier 4 never moves a number on "
+        "its own. Run `arsenal backtest` to see how the model scores.[/dim]"
     )
+
+
+def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False):
+    """Collect evidence from every configured source, reporting what failed.
+
+    Sources degrade to empty rather than raising: one dead scraper must not cost
+    a gameweek. What was lost is returned so the caller can say so.
+    """
+    resolver = PlayerResolver.from_bootstrap(bootstrap)
+    evidence = []
+    notes: list[str] = []
+
+    for source in (FPLNewsSource(bootstrap), SetPieceSource(bootstrap)):
+        result = source.safe_gather(resolver)
+        if result.ok:
+            evidence.extend(result.evidence)
+            notes.append(f"[green]{result.name}[/green]: {len(result.evidence)} records")
+        else:
+            notes.append(f"[red]{result.name} failed[/red]: {result.error}")
+
+    if not use_llm:
+        return resolver, deduplicate(evidence), notes
+
+    client = build_client(config.secrets.anthropic_api_key)
+    if client is None:
+        notes.append(
+            "[yellow]no Anthropic credentials[/yellow] — skipping claim extraction. "
+            "Tier 1 sources still applied."
+        )
+        return resolver, deduplicate(evidence), notes
+
+    documents, reddit_error = fetch_reddit_documents(config.research.subreddits)
+    if reddit_error:
+        notes.append(f"[red]reddit failed[/red]: {reddit_error}")
+    else:
+        notes.append(f"[green]reddit[/green]: {len(documents)} documents")
+
+    videos, youtube_error = fetch_youtube_documents(
+        config.secrets.youtube_api_key, config.research.youtube_channels
+    )
+    if youtube_error:
+        notes.append(f"[red]youtube failed[/red]: {youtube_error}")
+    elif videos:
+        notes.append(f"[green]youtube[/green]: {len(videos)} documents")
+    documents.extend(videos)
+
+    if documents:
+        if not quiet:
+            console.print(f"[dim]extracting claims from {len(documents)} documents...[/dim]")
+        extracted, problems = extract_claims(client, documents, resolver)
+        evidence.extend(extracted)
+        notes.append(f"[green]extraction[/green]: {len(extracted)} claims")
+        if problems:
+            notes.append(
+                f"[yellow]{len(problems)} claims dropped[/yellow] (unresolved or invalid)"
+            )
+
+    return resolver, deduplicate(evidence), notes
+
+
+@app.command()
+def research(
+    llm: Annotated[
+        bool, typer.Option("--llm/--no-llm", help="Extract claims with Claude")
+    ] = True,
+    top: Annotated[int, typer.Option("--top", help="Adjustments to show")] = 20,
+) -> None:
+    """Gather team news and show how it would change the forecast.
+
+    Tier 1-3 evidence can move a number. Tier 4 (creators, Reddit opinion) never
+    does on its own — it surfaces claims to verify and reads what the field is
+    doing. That rule is enforced in code, not left to judgement.
+    """
+    config = Config.load()
+    with _client(config) as client:
+        bootstrap = client.bootstrap()
+
+    resolver, evidence, notes = _gather_evidence(config, bootstrap, use_llm=llm)
+    for note in notes:
+        console.print(f"  {note}")
+
+    summary = summarise_evidence(evidence)
+    console.print(
+        f"\n[bold]{summary.get('total', 0)}[/bold] records · "
+        f"[bold]{summary.get('actionable', 0)}[/bold] actionable "
+        f"(T1 {summary.get('tier1', 0)} · T2 {summary.get('tier2', 0)} · "
+        f"T3 {summary.get('tier3', 0)} · T4 {summary.get('tier4', 0)})"
+    )
+
+    report = build_report(evidence)
+    changed = sorted(report.changed_players, key=lambda a: a.availability_multiplier)[:top]
+
+    if changed:
+        table = Table(
+            Column("player", min_width=14, no_wrap=True),
+            "avail",
+            "why",
+            title="Forecast adjustments",
+        )
+        for adjustment in changed:
+            table.add_row(
+                resolver.describe(adjustment.player_id),
+                f"x{adjustment.availability_multiplier:.2f}",
+                adjustment.reasons[0][:74] if adjustment.reasons else "",
+            )
+        console.print(table)
+    else:
+        console.print("[dim]no evidence changed any forecast[/dim]")
+
+    if report.conflicts:
+        console.print(
+            f"\n[yellow]{len(report.conflicts)} conflicts[/yellow] — "
+            "sources disagree; uncertainty widened"
+        )
+    if report.hypotheses:
+        console.print(
+            f"[dim]{len(report.hypotheses)} Tier 4 claims recorded as hypotheses. "
+            "These moved nothing — verify at a higher tier before acting.[/dim]"
+        )
+    if report.stale_dropped:
+        console.print(f"[dim]{report.stale_dropped} stale claims discarded[/dim]")
 
 
 @app.command()

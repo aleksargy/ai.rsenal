@@ -4,11 +4,11 @@ An autonomous Fantasy Premier League manager. It researches, decides, submits,
 and then tells you what it did and why — so a deadline never passes with an
 injured captain and three free transfers rotting in the bank.
 
-> **Status: M3 (forecast).** Read client, schemas, rules engine, validator, the
-> multi-gameweek integer program, and a bottom-up expected-points model are built
-> and tested. The forecast beats a points-per-game baseline on every backtested
-> gameweek. Research agents and the executor are specified but not implemented.
-> See [the roadmap](#roadmap).
+> **Status: M4 (research).** Read client, schemas, rules engine, validator, the
+> multi-gameweek integer program, a bottom-up expected-points model, and the
+> evidence pipeline are built and tested. The forecast beats a points-per-game
+> baseline on every backtested gameweek. The executor is specified but not
+> implemented. See [the roadmap](#roadmap).
 
 ## The idea
 
@@ -89,6 +89,7 @@ uv run arsenal status      # your squad, bank, free transfers, chips (needs a se
 uv run arsenal plan        # solve for the optimal squad and print it
 uv run arsenal forecast    # highest expected-points players, with components
 uv run arsenal backtest    # score the forecast against completed gameweeks
+uv run arsenal research    # gather team news and show how it moves the forecast
 ```
 
 `plan` needs no credentials if you pass `--fresh`, which builds a squad from a
@@ -135,6 +136,37 @@ look good and mean nothing:
 Caveat worth stating plainly: this is a handful of gameweeks. Treat it as
 directional. Rank correlation is the number that matters — squad selection needs
 players ordered correctly, not their totals predicted exactly.
+
+## Evidence and tiers
+
+Research feeds the forecast through a tier system that is **enforced in code**,
+not left to judgement — because the most damaging failure mode of a system like
+this is a confident YouTuber's "nailed on to start" moving a number on its own.
+
+| Tier | What | May move a forecast |
+|---|---|---|
+| 1 — Fact | FPL API status, completed match data, club statements | Yes, up to ruling a player out entirely |
+| 2 — Measured | Understat / FBref / Opta underlying numbers | Yes, bounded |
+| 3 — Reported | Press conferences, named beat reporters | Yes, bounded and floored |
+| 4 — Opinion | Creators, Reddit, blog predictions | **Never** |
+
+Tier 4 earns its place two other ways: surfacing claims to verify at a higher
+tier, and showing what the field is doing. When a Tier 4 source *quotes* a
+primary — a creator relaying a press conference — the claim is promoted to
+Tier 3, because the press conference is the evidence and the creator is not.
+
+Other rules the pipeline enforces:
+
+- **Every claim needs a resolving URL.** A recollection is not evidence, and no
+  confidence score makes it one.
+- **Hedging is preserved.** "Should be available" is not "is available"; the
+  hedge halves the claim's force rather than being flattened away.
+- **Repetition is not corroboration.** Five outlets reporting one press
+  conference deduplicate to one record.
+- **Conflicts widen uncertainty rather than picking a winner.** Two reporters
+  disagreeing is itself the finding.
+- **Ambiguous names are dropped, never guessed.** Misattributing a claim to the
+  wrong player corrupts a forecast silently.
 
 ## Configuration
 
@@ -199,7 +231,7 @@ prints it.
 - [x] **M1** Read client, schemas, rules engine, independent validator, CLI, tests
 - [x] **M2** Integer program; `arsenal plan` prints a legal optimal squad
 - [x] **M3** Bottom-up expected points, backtested against completed gameweeks
-- [ ] **M4** Source adapters and the agent research fan-out
+- [x] **M4** Source adapters, evidence tiering, and LLM claim extraction
 - [ ] **M5** Session management and the three-layer executor
 - [ ] **M6** GitHub Actions scheduling, Telegram, full autonomy
 

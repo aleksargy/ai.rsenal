@@ -57,12 +57,28 @@ Two consequences that matter for forecasting:
    live fields on every element — use them directly rather than reconstructing
    from the component stats.
 
-> The **2 points** and the GKP exclusion are confirmed from `game_config.scoring`.
-> The **10 / 12 thresholds** are enforced engine-side and are *not* exposed in any
-> API payload. Treat them as the documented values, but validate empirically: for
-> any player with known `defensive_contribution` counts, check the threshold that
-> reproduces their observed awards. If validation fails, the thresholds moved —
-> stop and flag it rather than forecasting on a broken assumption.
+**`defensive_contribution` is the action COUNT, not the points.** This trips
+people up: a player with `defensive_contribution: 7` earned **0** points, not 7.
+The field is the tally the threshold is applied to. Verified composition:
+
+- **DEF:** `clearances_blocks_interceptions + tackles`
+- **MID / FWD:** `clearances_blocks_interceptions + tackles + recoveries`
+
+> **Verified empirically**, not assumed — over 1,236 player-gameweeks of GW1–4
+> live data, cross-checked against the engine's own `explain` points breakdown:
+> defenders were paid at a minimum count of **10** and never at 9 or below;
+> midfielders at a minimum of **12** and never at 11 or below. A clean split with
+> no overlap, and the award was always exactly 2 points. Goalkeepers were never
+> paid, consistent with `defensive_contribution.GKP = 0`.
+>
+> Re-run this check each season with `uv run arsenal validate-dc`. The thresholds
+> are enforced engine-side and appear in no payload, so a silent change would
+> otherwise corrupt every defensive forecast.
+
+One more practical note from the same data: **forwards earned defensive
+contribution zero times in 140 player-gameweeks.** The 12-action threshold is
+effectively out of reach for them, so treat DC as a DEF/MID scoring route and do
+not let it inflate a forward's forecast.
 
 ### Bonus (BPS)
 

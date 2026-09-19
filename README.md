@@ -4,11 +4,11 @@ An autonomous Fantasy Premier League manager. It researches, decides, submits,
 and then tells you what it did and why — so a deadline never passes with an
 injured captain and three free transfers rotting in the bank.
 
-> **Status: M2 (optimiser).** Read client, schemas, rules engine, validator and
-> the multi-gameweek integer program are built and tested — `arsenal plan` solves
-> a legal optimal squad in ~2.5s. The forecast is still a placeholder; research
-> agents and the executor are specified but not implemented. See
-> [the roadmap](#roadmap).
+> **Status: M3 (forecast).** Read client, schemas, rules engine, validator, the
+> multi-gameweek integer program, and a bottom-up expected-points model are built
+> and tested. The forecast beats a points-per-game baseline on every backtested
+> gameweek. Research agents and the executor are specified but not implemented.
+> See [the roadmap](#roadmap).
 
 ## The idea
 
@@ -87,6 +87,8 @@ uv run arsenal rules       # the live scoring table, straight from the game engi
 uv run arsenal deadline    # next deadline and which pipeline stage is due
 uv run arsenal status      # your squad, bank, free transfers, chips (needs a session)
 uv run arsenal plan        # solve for the optimal squad and print it
+uv run arsenal forecast    # highest expected-points players, with components
+uv run arsenal backtest    # score the forecast against completed gameweeks
 ```
 
 `plan` needs no credentials if you pass `--fresh`, which builds a squad from a
@@ -104,6 +106,35 @@ than showing you an illegal squad.
 
 `doctor` needs no credentials and is the right first command — it tells you
 whether a failure is your code or the API having moved underneath you.
+
+## Does the forecast work?
+
+`arsenal backtest` predicts each gameweek using only data from strictly before
+it, then scores the result. Current season to date:
+
+| | model | baseline |
+|---|---|---|
+| Mean absolute error | **2.35** | 2.98 |
+| Rank correlation | **+0.251** | +0.175 |
+
+The model's ten highest-rated players outscored the field by **+1.84 points per
+gameweek**. The baseline is each player's points per gameweek so far — "just pick
+whoever has been scoring", which is the bar any model has to clear to justify its
+complexity.
+
+Two things the backtest is careful about, because both would make the numbers
+look good and mean nothing:
+
+- **Injury status is disabled.** `status` describes today, so using it to predict
+  a past gameweek tells the model who got injured. Live forecasts keep it — that
+  information is genuinely available before a deadline.
+- **Season totals are never read.** Everything in `bootstrap.elements` is
+  cumulative to now and silently includes the gameweek being predicted. Rates are
+  rebuilt from per-gameweek history truncated before the target.
+
+Caveat worth stating plainly: this is a handful of gameweeks. Treat it as
+directional. Rank correlation is the number that matters — squad selection needs
+players ordered correctly, not their totals predicted exactly.
 
 ## Configuration
 
@@ -150,7 +181,14 @@ value, which needs purchase prices from the authenticated `my-team/` endpoint.
 
 **Defensive contribution is a threshold, not a rate.** Expected points are
 `2 × P(actions ≥ threshold)`, not `2 × mean / threshold`. A player averaging 9.5
-CBIT is worth far less than one averaging 10.5.
+actions is worth far less than one averaging 10.5.
+
+**And `defensive_contribution` is the action count, not points.** A player with
+`defensive_contribution: 7` earned **0** points, not 7. It is the tally the
+threshold applies to: `CBIT + tackles` for defenders, plus `recoveries` for
+midfielders and forwards. Thresholds of 10 and 12 are verified empirically
+against the engine's own `explain` breakdown over 1,236 player-gameweeks — no
+overlap, award always exactly 2 points. Forwards cleared it zero times.
 
 **Never trust a remembered rule.** Scoring changes most seasons. `game_config` in
 `bootstrap-static` is the live config the FPL engine runs on — `arsenal rules`
@@ -160,7 +198,7 @@ prints it.
 
 - [x] **M1** Read client, schemas, rules engine, independent validator, CLI, tests
 - [x] **M2** Integer program; `arsenal plan` prints a legal optimal squad
-- [ ] **M3** Bottom-up expected points, backtested against completed gameweeks
+- [x] **M3** Bottom-up expected points, backtested against completed gameweeks
 - [ ] **M4** Source adapters and the agent research fan-out
 - [ ] **M5** Session management and the three-layer executor
 - [ ] **M6** GitHub Actions scheduling, Telegram, full autonomy

@@ -15,13 +15,21 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
-from rich.table import Table
+from rich.table import Column, Table
 
 from .config import Config
+from .forecast import build_league_model, forecast_players, load_history, upcoming_fixtures
+from .forecast.backtest import backtest as run_backtest
 from .fpl.client import AuthRequired, FPLClient, FPLError
 from .fpl.rules import SquadPlayer, available_chips, valid_formations, validate_squad
 from .money import format_money
-from .optimizer import OptimiserConfig, OptimiserError, build_candidates, optimise
+from .optimizer import (
+    OptimiserConfig,
+    OptimiserError,
+    build_candidates,
+    candidates_from_forecasts,
+    optimise,
+)
 
 app = typer.Typer(
     name="arsenal",
@@ -285,9 +293,11 @@ def plan(
 ) -> None:
     """Solve for the best squad and print the proposed gameweek.
 
-    Uses the placeholder forecast from ``optimizer.baseline`` — good enough to
-    exercise the solver end to end, not yet good enough to trust unattended.
-    M3 replaces it.
+    Expected points come from the bottom-up forecast: appearance and 60-minute
+    probabilities, shrunk attacking rates adjusted for the opponent, clean-sheet
+    probability from a Poisson model, and defensive contribution as a threshold
+    crossing. Run `arsenal backtest` to see how it scores against completed
+    gameweeks.
     """
     config = Config.load()
     settings = config.optimiser
@@ -297,6 +307,8 @@ def plan(
         elements = bootstrap.element_by_id()
         teams = bootstrap.team_by_id()
         nxt = bootstrap.next_event
+        history = load_history(client, bootstrap)
+        all_fixtures = client.fixtures()
 
         my_team = None
         if not fresh and config.secrets.team_id:
@@ -333,9 +345,25 @@ def plan(
         play_limits=bootstrap.play_limits(),
     )
 
-    candidates = build_candidates(bootstrap, my_team=my_team, horizon=opt_config.horizon)
+    start = nxt.id if nxt else history.latest_gameweek + 1
+    if history.gameweeks:
+        league = build_league_model(history, bootstrap)
+        schedule = upcoming_fixtures(
+            all_fixtures, start_gameweek=start, horizon=opt_config.horizon
+        )
+        forecasts = forecast_players(
+            bootstrap, history, league, schedule, horizon=opt_config.horizon
+        )
+        candidates = candidates_from_forecasts(bootstrap, forecasts, my_team=my_team)
+        source = f"{len(history.gameweeks)} completed GW"
+    else:
+        # Pre-season, or a fresh dataset: no match history to build rates from.
+        candidates = build_candidates(bootstrap, my_team=my_team, horizon=opt_config.horizon)
+        source = "no history - placeholder forecast"
+
     console.print(
         f"[dim]pool: {len(candidates)} players · horizon {opt_config.horizon} GW · "
+        f"forecast from {source} · "
         f"bank {format_money(bank)} · {free_transfers} free transfer(s)"
         + (f" · chip {chip}" if chip else "")
         + "[/dim]\n"
@@ -440,8 +468,153 @@ def plan(
         console.print(f"[yellow]warn[/yellow] {warning}")
 
     console.print(
-        "\n[dim]Forecast is the M3 placeholder: FPL's own ep_next blended with a "
-        "shrunk season rate. No research, fixtures, or team news yet.[/dim]"
+        "\n[dim]Expected points are model output, not research: no press "
+        "conferences, creator claims or community signal feed this yet. "
+        "Run `arsenal backtest` to see how it scores.[/dim]"
+    )
+
+
+@app.command()
+def backtest(
+    first: Annotated[int | None, typer.Option("--from", help="First gameweek")] = None,
+    last: Annotated[int | None, typer.Option("--to", help="Last gameweek")] = None,
+) -> None:
+    """Score the forecast against completed gameweeks.
+
+    Each gameweek is predicted using only data from strictly before it, with
+    current injury status disabled — otherwise the model would be told who got
+    injured, which it could not have known at the time.
+
+    Rank correlation is the number that matters: squad selection needs players
+    ordered correctly, not their totals predicted exactly.
+    """
+    config = Config.load()
+    with _client(config) as client:
+        bootstrap = client.bootstrap()
+        results = run_backtest(client, bootstrap, first=first, last=last)
+
+    if not results:
+        console.print(
+            "[yellow]not enough completed gameweeks to backtest[/yellow] — "
+            "at least two are needed."
+        )
+        raise typer.Exit(0)
+
+    table = Table(
+        "GW",
+        "n",
+        "MAE",
+        "baseline",
+        "rank corr",
+        "base corr",
+        "top 10",
+        "field",
+        title="Backtest — predicting each gameweek from those before it",
+    )
+    for r in results:
+        better = "[green]" if r.mae < r.baseline_mae else "[red]"
+        table.add_row(
+            str(r.gameweek),
+            str(r.n),
+            f"{better}{r.mae:.2f}[/]",
+            f"{r.baseline_mae:.2f}",
+            f"{r.spearman:+.3f}",
+            f"{r.baseline_spearman:+.3f}",
+            f"{r.top10_actual:.1f}",
+            f"{r.field_actual:.1f}",
+        )
+    console.print(table)
+
+    n = len(results)
+    mae = sum(r.mae for r in results) / n
+    base_mae = sum(r.baseline_mae for r in results) / n
+    corr = sum(r.spearman for r in results) / n
+    base_corr = sum(r.baseline_spearman for r in results) / n
+    lift = sum(r.top10_actual for r in results) / n - sum(r.field_actual for r in results) / n
+
+    console.print(
+        f"\nmean MAE [bold]{mae:.3f}[/bold] vs baseline {base_mae:.3f} "
+        f"({(base_mae - mae) / base_mae:+.1%})"
+    )
+    console.print(
+        f"mean rank correlation [bold]{corr:+.3f}[/bold] vs baseline {base_corr:+.3f}"
+    )
+    console.print(
+        f"top-10 picks outscored the field by [bold]{lift:+.2f}[/bold] points per gameweek"
+    )
+    console.print(
+        "\n[dim]A handful of gameweeks is a small sample — treat these as "
+        "directional. Baseline is each player's points per gameweek so far.[/dim]"
+    )
+
+
+@app.command()
+def forecast(
+    horizon: Annotated[int, typer.Option("--horizon", help="Gameweeks ahead")] = 1,
+    top: Annotated[int, typer.Option("--top", help="Players to show")] = 20,
+    position: Annotated[str | None, typer.Option("--position", help="GKP/DEF/MID/FWD")] = None,
+) -> None:
+    """Show the highest expected-points players, with their component breakdown."""
+    config = Config.load()
+    with _client(config) as client:
+        bootstrap = client.bootstrap()
+        history = load_history(client, bootstrap)
+        fixtures = client.fixtures()
+
+    if not history.gameweeks:
+        console.print("[yellow]no completed gameweeks yet — nothing to forecast from[/yellow]")
+        raise typer.Exit(0)
+
+    nxt = bootstrap.next_event
+    start = nxt.id if nxt else history.latest_gameweek + 1
+    league = build_league_model(history, bootstrap)
+    schedule = upcoming_fixtures(fixtures, start_gameweek=start, horizon=horizon)
+    forecasts = forecast_players(bootstrap, history, league, schedule, horizon=horizon)
+
+    teams = bootstrap.team_by_id()
+    elements = bootstrap.element_by_id()
+    wanted = position.upper() if position else None
+
+    ranked = sorted(
+        (f for f in forecasts.values() if not wanted or f.position.short == wanted),
+        key=lambda f: sum(f.xp),
+        reverse=True,
+    )[:top]
+
+    table = Table(
+        "pos",
+        Column("player", min_width=12, no_wrap=True),
+        "club",
+        "price",
+        "p60",
+        "xP",
+        "gls",
+        "ast",
+        "CS",
+        "DC",
+        title=f"Expected points — GW{start}"
+        + (f"-{start + horizon - 1}" if horizon > 1 else ""),
+    )
+    for f in ranked:
+        element = elements[f.element_id]
+        b = f.breakdowns[0]
+        table.add_row(
+            f.position.short,
+            f.name,
+            teams[f.team].short_name if f.team in teams else "?",
+            format_money(element.now_cost),
+            f"{f.minutes[0].p_sixty:.0%}",
+            f"[bold]{sum(f.xp):.2f}[/bold]" if horizon > 1 else f"[bold]{b.total:.2f}[/bold]",
+            f"{b.goals:.1f}",
+            f"{b.assists:.1f}",
+            f"{b.clean_sheet:.1f}",
+            f"{b.defensive_contribution:.1f}",
+        )
+    console.print(table)
+    console.print(
+        f"\n[dim]From {len(history.gameweeks)} completed gameweeks. "
+        "Rates are shrunk toward positional priors; defensive contribution is "
+        "the probability of crossing the action threshold.[/dim]"
     )
 
 

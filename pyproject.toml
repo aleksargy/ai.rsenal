@@ -37,7 +37,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # RUF001/RUF003: the CLI deliberately prints a typographic minus ("T−72h") and
 # middot separators. They are display strings, not identifiers.
-ignore = ["RUF001", "RUF003"]
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

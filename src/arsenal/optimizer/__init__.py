@@ -10,6 +10,7 @@ from .model import (
     Plan,
     optimise,
 )
+from .pool import candidates_from_forecasts
 
 __all__ = [
     "Candidate",
@@ -21,5 +22,6 @@ __all__ = [
     "availability",
     "baseline_xp",
     "build_candidates",
+    "candidates_from_forecasts",
     "optimise",
 ]

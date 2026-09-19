@@ -36,8 +36,15 @@ TIER_AUTHORITY: dict[Tier, float] = {
     Tier.FACT: 1.00,
     Tier.MEASURED: 0.60,
     Tier.REPORTED: 0.45,
-    Tier.OPINION: 0.00,
+    Tier.OPINION: 0.20,
 }
+"""How much a single claim of each tier may scale availability.
+
+Tier 4 carries a real but deliberately small weight, roughly half a reporter's.
+It only applies when ``max_tier`` is raised to admit opinion at all; at the
+default it is gated out before this table is consulted. The two controls are
+separate on purpose: *whether* a tier counts is policy, *how much* it counts is
+a property of the tier."""
 
 # Floor on any downgrade from a single piece of evidence, so one misread
 # sentence cannot zero out a player the statistics say is nailed.
@@ -140,6 +147,7 @@ def build_report(
     *,
     now: datetime | None = None,
     gameweek: int | None = None,
+    max_tier: Tier = Tier.REPORTED,
 ) -> ResearchReport:
     """Turn evidence into per-player adjustments, enforcing the tier rules.
 
@@ -163,7 +171,7 @@ def build_report(
             item.player_id, Adjustment(player_id=item.player_id)
         )
 
-        if not may_adjust_forecast(item, now=moment):
+        if not may_adjust_forecast(item, now=moment, max_tier=max_tier):
             adjustment.ignored.append(item)
             if item.tier == Tier.OPINION:
                 # Not evidence, but worth checking at a higher tier. This is the

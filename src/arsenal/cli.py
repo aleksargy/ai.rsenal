@@ -21,6 +21,8 @@ from rich.table import Column, Table
 
 from .cli_auth import auth_app
 from .cli_explain import explain as explain_command
+from .cli_run import run as run_command
+from .cli_sources import sources as sources_command
 from .config import Config
 from .forecast import build_league_model, forecast_players, load_history, upcoming_fixtures
 from .forecast.backtest import backtest as run_backtest
@@ -39,6 +41,7 @@ from .research import (
     PlayerResolver,
     ScoutRiskSource,
     SetPieceSource,
+    Tier,
     apply_to_forecasts,
     build_client,
     build_report,
@@ -71,6 +74,8 @@ app = typer.Typer(
 console = Console()
 app.add_typer(auth_app, name="auth")
 app.command("explain")(explain_command)
+app.command("run")(run_command)
+app.command("sources")(sources_command)
 
 
 def _client(config: Config, *, gameweek: int | None = None) -> FPLClient:
@@ -399,7 +404,11 @@ def plan(
             _, evidence, notes = _gather_evidence(
                 config, bootstrap, use_llm=llm, quiet=True, raw=raw_elements
             )
-            report = build_report(evidence, gameweek=start)
+            report = build_report(
+                evidence,
+                gameweek=start,
+                max_tier=Tier(config.research.max_tier_that_moves_forecast),
+            )
             apply_to_forecasts(forecasts, report)
             changed = len(report.changed_players)
             for note in notes:
@@ -552,11 +561,16 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, r
     if not use_llm:
         return resolver, deduplicate(evidence), notes
 
-    client = build_client(config.secrets.anthropic_api_key)
-    if client is None:
+    backend = build_client(
+        config.secrets.anthropic_api_key,
+        provider=config.research.provider,
+        model=config.research.model,
+        gemini_key=config.secrets.gemini_api_key,
+    )
+    if backend is None:
         notes.append(
-            "[yellow]no Anthropic credentials[/yellow] — skipping claim extraction. "
-            "Tier 1 sources still applied."
+            "[yellow]no model credentials[/yellow] — skipping claim extraction. "
+            "Set ANTHROPIC_API_KEY or GEMINI_API_KEY. Tier 1 sources still applied."
         )
         return resolver, deduplicate(evidence), notes
 
@@ -574,9 +588,13 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, r
     if article_problems:
         notes.append(f"[yellow]{len(article_problems)} club articles unreachable[/yellow]")
 
-    reddit_docs, reddit_error = fetch_reddit_documents(config.research.subreddits)
+    reddit_docs, reddit_error = fetch_reddit_documents(
+        config.research.subreddits,
+        client_id=config.secrets.reddit_client_id,
+        client_secret=config.secrets.reddit_client_secret,
+    )
     if reddit_error:
-        notes.append(f"[red]reddit failed[/red]: {reddit_error}")
+        notes.append(f"[yellow]reddit skipped[/yellow]: {reddit_error}")
     else:
         notes.append(f"[green]reddit[/green]: {len(reddit_docs)} documents")
     documents.extend(reddit_docs)
@@ -593,9 +611,12 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, r
     if documents:
         if not quiet:
             console.print(f"[dim]extracting claims from {len(documents)} documents...[/dim]")
-        extracted, problems = extract_claims(client, documents, resolver)
+        extracted, problems = extract_claims(backend, documents, resolver)
         evidence.extend(extracted)
-        notes.append(f"[green]extraction[/green]: {len(extracted)} claims")
+        notes.append(
+            f"[green]extraction[/green] ({backend.name}/{backend.model}): "
+            f"{len(extracted)} claims"
+        )
         if problems:
             notes.append(
                 f"[yellow]{len(problems)} claims dropped[/yellow] (unresolved or invalid)"
@@ -624,6 +645,7 @@ def research(
 
     nxt = bootstrap.next_event
     gameweek = nxt.id if nxt else None
+    max_tier = Tier(config.research.max_tier_that_moves_forecast)
 
     resolver, evidence, notes = _gather_evidence(
         config, bootstrap, use_llm=llm, raw=raw_elements
@@ -639,7 +661,7 @@ def research(
         f"T3 {summary.get('tier3', 0)} · T4 {summary.get('tier4', 0)})"
     )
 
-    report = build_report(evidence, gameweek=gameweek)
+    report = build_report(evidence, gameweek=gameweek, max_tier=max_tier)
     changed = sorted(report.changed_players, key=lambda a: a.availability_multiplier)[:top]
 
     if changed:

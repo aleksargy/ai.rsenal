@@ -133,6 +133,36 @@ class ResearchSettings:
     min_sources: int = 2
     """Below this many working adapters, abort rather than forecast on thin evidence."""
 
+    max_tier_that_moves_forecast: int = 3
+    """How far down the source tiers a claim may still change a number.
+
+    3 (default) means official data, measured stats and reported claims count,
+    while unattributed opinion does not. 4 admits creator and community opinion
+    too, at roughly half a reporter's weight.
+
+    Narrower than it sounds: a creator who *attributes* a claim to a press
+    conference is already promoted to Tier 3 and counts either way. Only pure
+    opinion is gated. Raise it and re-run `arsenal backtest` - that is the only
+    way to find out whether it helps."""
+
+    provider: str = "auto"
+    """Which model provider extracts claims: auto, anthropic, or gemini.
+
+    `auto` prefers Anthropic for quality and falls back to Gemini, so the
+    pipeline uses whatever you have configured. Gemini has a genuinely free tier
+    through Google AI Studio; Anthropic is paid but small."""
+
+    model: str | None = None
+    """Model id. None picks the provider default - claude-opus-5 or
+    gemini-2.5-flash."""
+    """Model used to extract claims from prose.
+
+    Extraction quality sets P(plays), which dominates every forecast — a misread
+    hedge costs more points than any amount of optimiser tuning, so the default
+    is the most capable model. A full research run is roughly 51k input and 18k
+    output tokens: about $0.71 on claude-opus-5, $0.28 on claude-sonnet-5, $0.14
+    on claude-haiku-4-5. The trade is yours to make."""
+
 
 @dataclass
 class ScheduleSettings:
@@ -186,6 +216,7 @@ class Secrets:
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     youtube_api_key: str | None = None
+    gemini_api_key: str | None = None
     reddit_client_id: str | None = None
     reddit_client_secret: str | None = None
 
@@ -230,6 +261,9 @@ class Secrets:
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
             youtube_api_key=os.environ.get("YOUTUBE_API_KEY"),
+            gemini_api_key=(
+                os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            ),
             reddit_client_id=os.environ.get("REDDIT_CLIENT_ID"),
             reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET"),
         )

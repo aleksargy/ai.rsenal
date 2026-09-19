@@ -19,9 +19,15 @@ refresh token is — and the discovery document confirms ``refresh_token`` is a
 supported grant, so tokens can be minted on demand without a browser.
 
 This is *better* than the cookie model it replaced. A refresh token is a
-first-class, long-lived credential designed to be replayed from a server, where
-a session cookie bound to a browser fingerprint was always going to be fragile
-from CI.
+first-class credential designed to be replayed from a server, where a session
+cookie bound to a browser fingerprint was always going to be fragile from CI.
+
+**One caveat found the hard way.** PingOne rotates refresh tokens on every use
+and revokes the whole chain if a superseded one is replayed - standard OAuth
+reuse detection. So the agent and a still-logged-in browser compete for the same
+chain: whichever refreshes last wins, and the other copy is dead. A durable
+unattended session wants the capture browser logged out afterwards, so nothing
+else is refreshing behind the agent.
 """
 
 from __future__ import annotations
@@ -196,10 +202,24 @@ def refresh_tokens(tokens: OidcTokens, *, timeout: float = 30.0) -> OidcTokens:
     )
 
     if response.status_code != 200:
-        # A 400 here usually means the refresh token was revoked or already
-        # rotated — recoverable only by capturing a new session.
+        body = response.text
+        if "invalid_grant" in body or "does not exist" in body:
+            # Not a transport failure — the chain has been revoked, and no retry
+            # will help. Worth an explanation rather than a raw 400, because the
+            # cause is non-obvious and the fix is a one-liner.
+            raise TokenError(
+                "the refresh token has been revoked.\n\n"
+                "PingOne rotates refresh tokens on every use and revokes the "
+                "whole chain if a superseded one is replayed. The usual cause is "
+                "a browser still logged into FPL: its own OIDC client refreshes "
+                "on its own schedule, which invalidates the copy captured here.\n\n"
+                "For a durable unattended session, log out of FPL in that browser "
+                "after running `arsenal auth attach` — or just re-capture when "
+                "this happens. Reads and forecasts keep working either way; only "
+                "your own squad and any write need the token."
+            )
         raise TokenError(
-            f"token refresh failed ({response.status_code}): {response.text[:200]}\n"
+            f"token refresh failed ({response.status_code}): {body[:200]}\n"
             "If this persists, log into FPL again and re-run `arsenal auth attach`."
         )
 

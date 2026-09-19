@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pydantic import BaseModel, Field
 
 from .evidence import Evidence, Tier
+from .providers import ExtractionBackend, build_backend
 from .resolver import PlayerResolver
 from .sources import Document
 
@@ -91,12 +92,11 @@ VALID_IMPACTS: frozenset[str] = frozenset(
 
 
 def extract_claims(
-    client: object,
+    backend: ExtractionBackend,
     documents: list[Document],
     resolver: PlayerResolver,
     *,
-    model: str = DEFAULT_MODEL,
-    max_documents: int = 40,
+    max_documents: int = 60,
 ) -> tuple[list[Evidence], list[str]]:
     """Extract evidence from documents.
 
@@ -104,41 +104,34 @@ def extract_claims(
     a partial extraction still produces a usable run — and so a run that quietly
     lost half its input is visibly different from one that worked.
 
-    ``client`` is an ``anthropic.Anthropic`` instance. It is typed loosely so the
-    package imports cleanly without the optional ``agents`` extra installed.
+    ``backend`` is whichever model provider is configured — Anthropic or Gemini.
+    Nothing below this line knows which, because the job is the same either way:
+    read prose, emit checkable claims.
     """
     evidence: list[Evidence] = []
     problems: list[str] = []
     promoted = 0
 
     for document in documents[:max_documents]:
+        prompt = (
+            f"Source: {document.source_name}\n"
+            f"Published: {document.published_at:%Y-%m-%d}\n\n"
+            f"{document.text}"
+        )
         try:
-            response = client.messages.parse(  # type: ignore[attr-defined]
-                model=model,
-                max_tokens=4096,
-                system=EXTRACTION_SYSTEM,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Source: {document.source_name}\n"
-                            f"Published: {document.published_at:%Y-%m-%d}\n\n"
-                            f"{document.text}"
-                        ),
-                    }
-                ],
-                output_format=ExtractionResult,
-            )
-            parsed = response.parsed_output
+            raw_claims = backend.extract(EXTRACTION_SYSTEM, prompt)
         except Exception as exc:  # one bad document must not end the run
             problems.append(f"{document.url}: {exc}")
             log.warning("extraction failed for %s: %s", document.url, exc)
             continue
 
-        if parsed is None:
-            continue
+        for raw in raw_claims:
+            try:
+                claim = ExtractedClaim.model_validate(raw)
+            except Exception as exc:
+                problems.append(f"{document.url}: malformed claim ({exc})")
+                continue
 
-        for claim in parsed.claims:
             if claim.impact not in VALID_IMPACTS:
                 problems.append(f"{document.url}: unknown impact {claim.impact!r}")
                 continue
@@ -184,24 +177,24 @@ def extract_claims(
     return evidence, problems
 
 
-def build_client(api_key: str | None) -> object | None:
-    """Construct an Anthropic client, or return None if unavailable.
+def build_client(
+    anthropic_key: str | None,
+    *,
+    provider: str = "auto",
+    model: str | None = None,
+    gemini_key: str | None = None,
+) -> ExtractionBackend | None:
+    """Select an extraction backend, or None when nothing is configured.
 
-    An unset ``ANTHROPIC_API_KEY`` does not necessarily mean no credentials — the
-    SDK also resolves an ``ant auth login`` profile — so a bare constructor is
-    attempted even without an explicit key.
+    Returning None is a normal state, not a failure: the pipeline then runs on
+    Tier 1 data alone, which still catches every official injury and suspension.
     """
-    try:
-        import anthropic
-    except ImportError:
-        log.info("anthropic SDK not installed; install the 'agents' extra")
-        return None
-
-    try:
-        return anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
-    except Exception as exc:  # missing credentials is a normal state
-        log.info("no Anthropic credentials available: %s", exc)
-        return None
+    return build_backend(
+        provider=provider,
+        model=model,
+        anthropic_key=anthropic_key,
+        gemini_key=gemini_key,
+    )
 
 
 def summarise_evidence(evidence: list[Evidence]) -> dict[str, int]:
@@ -212,6 +205,6 @@ def summarise_evidence(evidence: list[Evidence]) -> dict[str, int]:
         summary[item.impact] = summary.get(item.impact, 0) + 1
     summary["total"] = len(evidence)
     summary["actionable"] = sum(
-        1 for e in evidence if e.may_move_forecast and not e.is_stale(now=datetime.now(UTC))
+        1 for e in evidence if e.may_move_forecast() and not e.is_stale(now=datetime.now(UTC))
     )
     return summary

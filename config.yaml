@@ -55,6 +55,37 @@ research:
   # evidence.
   min_sources: 2
 
+  # How far down the source tiers a claim may still change a number.
+  #   3 = official data, measured stats, and reported claims (default)
+  #   4 = also lets unattributed creator/community opinion count, at roughly
+  #       half a reporter's weight
+  #
+  # Narrower than it sounds: a creator who ATTRIBUTES a claim to a press
+  # conference is already promoted to Tier 3 and counts either way. Only pure
+  # opinion is gated.
+  #
+  # The default is a starting position, not a verdict - we hold no track record
+  # for any individual source, so "expert" is an assertion until measured. Set
+  # it to 4, re-run `arsenal backtest`, and let the numbers decide.
+  max_tier_that_moves_forecast: 3
+
+  # Which provider extracts claims: auto | anthropic | gemini
+  #   auto     prefers Anthropic for quality, falls back to Gemini
+  #   gemini   Google AI Studio has a genuinely free tier whose rate limits
+  #            comfortably fit a run of ~60 documents
+  provider: auto
+
+  # Model id. Leave blank to use the provider default (claude-opus-5 or
+  # gemini-2.5-flash).
+  # model:
+
+  # Model used to extract claims from press conferences and community posts.
+  # A full research run is ~51k input / ~18k output tokens, so roughly:
+  #   claude-opus-5     $0.71 per run   (~$107 a season at 4 runs per gameweek)
+  #   claude-sonnet-5   $0.28 per run   (~$43 a season)
+  #   claude-haiku-4-5  $0.14 per run   (~$21 a season)
+  # Extraction quality sets P(plays), which dominates the forecast — hence the
+  # capable default. Downgrade if the cost matters more than the last few points.
   subreddits:
     - FantasyPL
 

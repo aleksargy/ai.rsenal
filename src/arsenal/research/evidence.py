@@ -45,10 +45,21 @@ Impact = Literal[
     "price",
 ]
 
-# Tier 4 exists to surface claims worth checking and to read what the field is
-# doing. It must never move a number on its own: five creators repeating one
-# rumour is one unverified rumour, not five, and popularity is uncorrelated with
-# accuracy in engagement-driven media.
+# How far down the tiers a claim may still move a number. The default stops at
+# Tier 3, so unattributed opinion is recorded but not acted on.
+#
+# This is a **default, not a verdict.** The case for it: five creators repeating
+# one rumour is one unverified rumour, engagement rewards bold calls over
+# calibrated ones, and we hold no track record for any individual source - so
+# "expert" is an assertion rather than a measurement.
+#
+# The case against it: some creators are genuinely ahead of the official flags,
+# and a blanket rule cannot tell them apart. Note the promotion rule already
+# admits their best work - a claim they attribute to a press conference becomes
+# Tier 3 and counts. Only pure opinion is held back.
+#
+# Raise it via `research.max_tier_that_moves_forecast` and let the backtest
+# judge whether it helps. That is the honest way to settle it.
 MAX_TIER_THAT_MOVES_A_FORECAST = Tier.REPORTED
 
 # Availability claims decay fast — a Tuesday injury report is superseded
@@ -144,13 +155,17 @@ class Evidence(BaseModel):
             limit *= 2
         return self.age(now=now) > limit
 
-    @property
-    def may_move_forecast(self) -> bool:
+    def may_move_forecast(self, max_tier: Tier = MAX_TIER_THAT_MOVES_A_FORECAST) -> bool:
         """Whether this record is permitted to change a number."""
-        return self.tier <= MAX_TIER_THAT_MOVES_A_FORECAST
+        return self.tier <= max_tier
 
 
-def may_adjust_forecast(evidence: Evidence, *, now: datetime | None = None) -> bool:
+def may_adjust_forecast(
+    evidence: Evidence,
+    *,
+    now: datetime | None = None,
+    max_tier: Tier = MAX_TIER_THAT_MOVES_A_FORECAST,
+) -> bool:
     """The gate every adjustment must pass.
 
     Three independent reasons to refuse, all of them load-bearing:
@@ -161,7 +176,7 @@ def may_adjust_forecast(evidence: Evidence, *, now: datetime | None = None) -> b
       been superseded by events you simply have not fetched.
     * **A claim with no player and no team cannot be applied** to anything.
     """
-    if not evidence.may_move_forecast:
+    if not evidence.may_move_forecast(max_tier):
         return False
     if evidence.is_stale(now=now):
         return False

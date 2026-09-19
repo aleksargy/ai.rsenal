@@ -12,13 +12,10 @@ deliberate: both mean "no evidence from here", and both are reported.
 
 from __future__ import annotations
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-
-import httpx
+from datetime import UTC, datetime
 
 from ..fpl.schemas import Bootstrap, Element
 from .evidence import Evidence, Tier
@@ -182,58 +179,6 @@ class SetPieceSource(Source):
         return "Set-piece duty: " + ", ".join(parts)
 
 
-class RedditSource(Source):
-    """Tier 3-4 community signal from r/FantasyPL.
-
-    Scout threads and daily discussion are the fastest route to late team news —
-    frequently the single highest-value input in the final hours before a
-    deadline, because it is the one thing statistics cannot supply.
-
-    Raw posts are returned here as *unextracted text*. The LLM extractor turns
-    them into claims, and the tier rules decide whether any of it may move a
-    number.
-    """
-
-    name = "reddit"
-
-    def __init__(self, subreddits: list[str], *, limit: int = 25) -> None:
-        self.subreddits = subreddits
-        self.limit = limit
-
-    def gather(self, resolver: PlayerResolver, **context: object) -> SourceResult:
-        documents: list[tuple[str, str, datetime]] = []
-        # Reddit's public JSON needs no credentials for read-only listings, but
-        # it does require an honest User-Agent — a default client string is
-        # rate-limited almost immediately.
-        headers = {"User-Agent": USER_AGENT}
-        with httpx.Client(headers=headers, timeout=20.0, follow_redirects=True) as client:
-            for subreddit in self.subreddits:
-                url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit={self.limit}"
-                response = client.get(url)
-                if response.status_code != 200:
-                    return SourceResult.failed(
-                        self.name, f"r/{subreddit} returned {response.status_code}"
-                    )
-                for child in response.json().get("data", {}).get("children", []):
-                    data = child.get("data", {})
-                    text = f"{data.get('title', '')}\n{data.get('selftext', '')}".strip()
-                    if not text:
-                        continue
-                    documents.append(
-                        (
-                            text[:4000],
-                            f"https://www.reddit.com{data.get('permalink', '')}",
-                            datetime.fromtimestamp(data.get("created_utc", 0), tz=UTC),
-                        )
-                    )
-
-        return SourceResult(
-            name=self.name,
-            evidence=[],
-            note=f"{len(documents)} documents fetched for extraction",
-        )
-
-
 @dataclass
 class Document:
     """Unstructured text awaiting claim extraction."""
@@ -243,106 +188,3 @@ class Document:
     source_name: str
     published_at: datetime
     tier: Tier
-
-
-def fetch_reddit_documents(
-    subreddits: list[str], *, limit: int = 25, max_age_days: int = 5
-) -> tuple[list[Document], str | None]:
-    """Fetch recent r/FantasyPL posts as documents for extraction.
-
-    Returns ``(documents, error)`` — never raises, so a Reddit outage costs this
-    source and nothing else.
-    """
-    cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
-    documents: list[Document] = []
-    try:
-        headers = {"User-Agent": USER_AGENT}
-        with httpx.Client(headers=headers, timeout=20.0, follow_redirects=True) as client:
-            for subreddit in subreddits:
-                response = client.get(
-                    f"https://www.reddit.com/r/{subreddit}/hot.json?limit={limit}"
-                )
-                response.raise_for_status()
-                for child in response.json().get("data", {}).get("children", []):
-                    data = child.get("data", {})
-                    published = datetime.fromtimestamp(data.get("created_utc", 0), tz=UTC)
-                    if published < cutoff:
-                        continue
-                    text = f"{data.get('title', '')}\n\n{data.get('selftext', '')}".strip()
-                    if len(text) < 40:
-                        continue
-                    documents.append(
-                        Document(
-                            text=text[:6000],
-                            url=f"https://www.reddit.com{data.get('permalink', '')}",
-                            source_name=f"r/{subreddit}",
-                            published_at=published,
-                            tier=Tier.OPINION,
-                        )
-                    )
-    except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        log.warning("reddit fetch failed: %s", exc)
-        return documents, str(exc)
-    return documents, None
-
-
-def fetch_youtube_documents(
-    api_key: str | None,
-    channel_ids: list[str],
-    *,
-    max_age_days: int = 5,
-    per_channel: int = 3,
-) -> tuple[list[Document], str | None]:
-    """Fetch recent creator video descriptions for extraction.
-
-    Without an API key this returns empty, which is the correct degradation: the
-    pipeline runs without creator input rather than failing.
-
-    A caveat worth knowing before wiring transcripts in: creator content is
-    **stale on arrival** — a Monday video is frequently obsolete by Friday's
-    press conference — and creators are rewarded for bold calls rather than for
-    calibration. This is Tier 4, and the tier rules will not let it move a number
-    on its own.
-    """
-    if not api_key or not channel_ids:
-        return [], None
-
-    published_after = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
-    documents: list[Document] = []
-    try:
-        with httpx.Client(timeout=20.0) as client:
-            for channel_id in channel_ids:
-                response = client.get(
-                    "https://www.googleapis.com/youtube/v3/search",
-                    params={
-                        "key": api_key,
-                        "channelId": channel_id,
-                        "part": "snippet",
-                        "order": "date",
-                        "maxResults": per_channel,
-                        "type": "video",
-                        "publishedAfter": published_after,
-                    },
-                )
-                response.raise_for_status()
-                for item in response.json().get("items", []):
-                    snippet = item.get("snippet", {})
-                    video_id = item.get("id", {}).get("videoId")
-                    if not video_id:
-                        continue
-                    text = f"{snippet.get('title', '')}\n\n{snippet.get('description', '')}"
-                    documents.append(
-                        Document(
-                            text=text[:6000],
-                            url=f"https://www.youtube.com/watch?v={video_id}",
-                            source_name=snippet.get("channelTitle", "YouTube"),
-                            published_at=datetime.fromisoformat(
-                                snippet["publishedAt"].replace("Z", "+00:00")
-                            ),
-                            tier=Tier.OPINION,
-                        )
-                    )
-    except (httpx.HTTPError, KeyError, ValueError) as exc:
-        log.warning("youtube fetch failed: %s", exc)
-        return documents, str(exc)
-    return documents, None

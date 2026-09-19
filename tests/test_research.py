@@ -72,15 +72,38 @@ class TestEvidenceValidation:
 
 
 class TestTierRules:
-    def test_tier_four_may_never_move_a_forecast(self) -> None:
-        """The single most important rule in the system.
+    def test_tier_four_is_gated_by_default(self) -> None:
+        """Unattributed opinion does not move a number unless you ask it to.
 
-        A confident creator asserting a player is nailed on is one person's
-        guess, however many views it has.
+        Note the scope: a creator who *attributes* a claim to a press conference
+        is promoted to Tier 3 by the extractor and counts either way. Only pure
+        opinion is gated here.
         """
         opinion = make_evidence(tier=Tier.OPINION, confidence=1.0)
-        assert opinion.may_move_forecast is False
+        assert opinion.may_move_forecast() is False
         assert may_adjust_forecast(opinion, now=NOW) is False
+
+    def test_tier_four_can_be_admitted_deliberately(self) -> None:
+        """The threshold is policy, not doctrine.
+
+        We hold no track record for any individual source, so the default is a
+        starting position to be tested rather than a verdict. Raising it lets the
+        backtest settle whether community opinion actually helps.
+        """
+        opinion = make_evidence(tier=Tier.OPINION, confidence=1.0)
+        assert opinion.may_move_forecast(Tier.OPINION) is True
+        assert may_adjust_forecast(opinion, now=NOW, max_tier=Tier.OPINION) is True
+
+    def test_admitted_opinion_carries_less_weight_than_a_reporter(self) -> None:
+        """Letting it count is not the same as trusting it equally."""
+        claim = make_evidence(tier=Tier.OPINION, confidence=1.0)
+        reported = make_evidence(tier=Tier.REPORTED, confidence=1.0)
+        opinion_report = build_report([claim], now=NOW, max_tier=Tier.OPINION)
+        reporter_report = build_report([reported], now=NOW)
+        assert (
+            opinion_report.adjustments[1].availability_multiplier
+            > reporter_report.adjustments[1].availability_multiplier
+        )
 
     @pytest.mark.parametrize("tier", [Tier.FACT, Tier.MEASURED, Tier.REPORTED])
     def test_tiers_one_to_three_may_move_a_forecast(self, tier: Tier) -> None:
@@ -493,3 +516,43 @@ class TestClubArticleGrouping:
         from arsenal.research import club_article_links
 
         assert club_article_links([{"id": 1, "team": 2}], {2: "AVL"}) == []
+
+
+class TestNoStalePropertyAccess:
+    """Guard against a property becoming a method and callers not noticing.
+
+    `Evidence.may_move_forecast` changed from a property to a method when the
+    tier threshold became configurable. Every remaining `if e.may_move_forecast`
+    then evaluated a bound method — always truthy, silently wrong, and no test
+    failed because the value was only used for a displayed count.
+
+    A bare reference to a known-callable attribute is almost always this mistake.
+    """
+
+    CALLABLE_ATTRS = ("may_move_forecast", "applies_to", "is_stale", "age")
+
+    def test_callables_are_never_referenced_bare(self) -> None:
+        import ast
+        import inspect
+
+        from arsenal.research import apply, evidence, extract, sources
+
+        offenders: list[str] = []
+        for module in (evidence, apply, extract, sources):
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                if node.attr not in self.CALLABLE_ATTRS:
+                    continue
+                # A bare attribute access outside a Call and outside a `def` is
+                # the bug; `self.x()` parses as Call(func=Attribute(...)).
+                parents = [
+                    n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.func is node
+                ]
+                if not parents:
+                    offenders.append(f"{module.__name__}:{node.lineno} .{node.attr}")
+
+        assert not offenders, "these look like methods used as properties: " + ", ".join(
+            offenders
+        )

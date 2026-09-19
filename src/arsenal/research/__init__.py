@@ -13,6 +13,7 @@ from .club_news import (
     fetch_club_articles,
     html_to_text,
 )
+from .community import RedditClient, fetch_reddit_documents, fetch_youtube_documents
 from .evidence import (
     Evidence,
     Impact,
@@ -22,24 +23,22 @@ from .evidence import (
     may_adjust_forecast,
 )
 from .extract import build_client, extract_claims, summarise_evidence
+from .providers import AnthropicBackend, ExtractionBackend, GeminiBackend, build_backend
 from .resolver import PlayerResolver, Resolution, normalise, resolve_all
-from .sources import (
-    Document,
-    FPLNewsSource,
-    SetPieceSource,
-    SourceResult,
-    fetch_reddit_documents,
-    fetch_youtube_documents,
-)
+from .sources import Document, FPLNewsSource, SetPieceSource, SourceResult
 
 __all__ = [
     "Adjustment",
+    "AnthropicBackend",
     "ClubArticle",
     "Document",
     "Evidence",
+    "ExtractionBackend",
     "FPLNewsSource",
+    "GeminiBackend",
     "Impact",
     "PlayerResolver",
+    "RedditClient",
     "ResearchReport",
     "Resolution",
     "ScoutRiskSource",
@@ -47,6 +46,7 @@ __all__ = [
     "SourceResult",
     "Tier",
     "apply_to_forecasts",
+    "build_backend",
     "build_client",
     "build_report",
     "club_article_links",

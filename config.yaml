@@ -1,0 +1,80 @@
+# ai.rsenal policy.
+#
+# Policy lives here, in version control, so a bad run is traceable to the setting
+# that caused it. Secrets live in the environment — see .env.example.
+
+optimiser:
+  # Gameweeks to plan over. Beyond ~5 the forecast is too noisy to be worth
+  # solving, and plans rarely survive that long intact anyway.
+  horizon: 5
+
+  # Per-gameweek discount on future expected points. Near-term xP is more
+  # reliable, so weight it accordingly.
+  discount: 0.85
+
+  # kappa in `xP - kappa * sigma`. Without this the solver chases volatile
+  # players' upper tails and builds a squad that looks great and swings wildly.
+  risk_aversion: 0.2
+
+  # Small bonus for bench quality, so the bench is not filled with GBP 4.0m
+  # players who never appear. Keep it small — bench points are secondary
+  # outside a Bench Boost.
+  bench_weight: 0.1
+
+  # Most points to spend on transfers in one gameweek. 4 permits a single hit;
+  # 0 disables hits entirely. Exceeding this degrades to advisory rather than
+  # submitting.
+  max_hit: 4
+
+  # Seconds. A timeout is a failed stage that retries on a shorter horizon,
+  # never a result to be trusted.
+  solver_time_limit: 60
+
+research:
+  # Candidates researched beyond the owned 15. Researching all 662 players is
+  # wasteful; this covers everyone realistically reachable.
+  shortlist_size: 60
+
+  # Availability claims older than this are discarded, not downweighted. A
+  # Tuesday injury report is superseded by Friday's press conference.
+  max_evidence_age_days: 10
+
+  # Below this many working source adapters, abort rather than forecast on thin
+  # evidence.
+  min_sources: 2
+
+  subreddits:
+    - FantasyPL
+
+  # YouTube channel ids to pull transcripts from. Tier 4: useful for surfacing
+  # claims to verify and for reading the field, never for moving an xP number
+  # on its own.
+  youtube_channels: []
+
+schedule:
+  # All relative to the gameweek deadline, never a fixed clock time — deadlines
+  # move for midweek and holiday rounds.
+  research_hours_before: 72
+  provisional_hours_before: 24
+  final_research_hours_before: 3
+  submit_minutes_before: 90
+  verify_minutes_before: 30
+
+  # Refuse to submit inside this margin. Too little room to recover if the
+  # write fails, and a failed late write is worse than an unchanged team.
+  abort_if_under_minutes: 10
+
+autonomy:
+  # False puts the whole system in advisory mode regardless of session health.
+  enabled: true
+
+  # Whether chips fire without approval.
+  auto_chips: true
+
+  # A Wildcard rewrites the entire squad. That is worth a human glance.
+  require_approval_for_wildcard: true
+
+  # Print payloads instead of sending them. LEAVE THIS TRUE until you have
+  # diffed `arsenal execute --dry-run` against a real browser submission — the
+  # write payload shapes are reconstructed, not independently verified.
+  dry_run: true

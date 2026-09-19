@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets — never commit a session or an API key
+.env
+.env.*
+!.env.example
+storage_state.json
+session.json
+
+# Cached API payloads. Regenerable, and large.
+data/cache/
+
+# Raw payloads are persisted per run for debugging a schema change. Keep the
+# parsed decision artifacts (data/runs/**/*.json) as the audit trail, but not
+# the multi-megabyte bootstrap dumps that produced them.
+data/runs/**/raw/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -70,6 +70,21 @@ def refresh_if_needed(session: Session, *, persist: bool = True) -> tuple[Sessio
     if persist:
         session.save(SESSION_PATH)
         update_env_file({"FPL_SESSION_JSON": session.to_env_value()})
+
+        # On a hosted runner the filesystem is discarded when the job ends, so
+        # the rotated token has to go back to the repository secret or the next
+        # run authenticates with one the provider has already revoked. Locally
+        # this is a no-op — .env is the durable store.
+        from .github_secrets import persist_session
+
+        problem = persist_session(session.to_env_value())
+        if problem:
+            log.error(
+                "the refresh token rotated but could not be saved to the "
+                "repository secret: %s — the next scheduled run will fail to "
+                "authenticate",
+                problem,
+            )
     return session, True
 
 

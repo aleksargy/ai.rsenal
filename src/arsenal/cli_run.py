@@ -39,6 +39,9 @@ def run(
         typer.Option("--llm/--no-llm", help="Extract claims from prose with Claude"),
     ] = None,
     chip: Annotated[str | None, typer.Option("--chip", help="Force a chip")] = None,
+    notify: Annotated[
+        bool, typer.Option("--notify", help="Send the summary to Telegram")
+    ] = False,
 ) -> None:
     """Run the full pipeline and print what the agent would do. Writes nothing.
 
@@ -249,6 +252,23 @@ def run(
         f"\n[bold green]DRY RUN[/bold green] — nothing was submitted. "
         f"Completed in {(datetime.now(UTC) - started).total_seconds():.0f}s."
     )
+
+    if notify:
+        _notify(
+            config=config,
+            decision=decision,
+            plan=plan,
+            index=index,
+            elements=elements,
+            teams=teams,
+            forecasts=forecasts,
+            report=report,
+            gameweek=nxt.id,
+            deadline=f"{nxt.deadline_time:%a %d %b %H:%M UTC}",
+            horizon=steps,
+            notes=notes,
+            validation=validation,
+        )
 
 
 def _summary(
@@ -461,3 +481,101 @@ def _drivers(*, decision, report, elements, teams, forecasts, owned: set[int]) -
             "\n  [dim]No team news changed any player in this squad. The "
             "decision rests entirely on the statistical forecast.[/dim]"
         )
+
+
+def _notify(
+    *,
+    config,
+    decision,
+    plan,
+    index,
+    elements,
+    teams,
+    forecasts,
+    report,
+    gameweek: int,
+    deadline: str,
+    horizon: int,
+    notes: list[str],
+    validation,
+) -> None:
+    """Send the run summary, and say so if it could not be sent.
+
+    A scheduled agent is invisible when it works, so this message is the only
+    evidence it is alive. That makes silent delivery failure worse than useless —
+    it would look exactly like a healthy quiet week.
+    """
+    from .notify import NotifyError, Summary, build
+
+    telegram = build(config.secrets.telegram_bot_token, config.secrets.telegram_chat_id)
+    if telegram is None:
+        console.print(
+            "\n[dim]no Telegram configured — set TELEGRAM_BOT_TOKEN and "
+            "TELEGRAM_CHAT_ID to receive this summary[/dim]"
+        )
+        return
+
+    def name(element_id: int) -> str:
+        element = elements.get(element_id)
+        if element is None:
+            return str(element_id)
+        club = teams[element.team].short_name if element.team in teams else "?"
+        return f"{element.name} ({club})"
+
+    transfers = []
+    outgoing = sorted(decision.transfers_out, key=lambda i: sum(index[i].xp), reverse=True)
+    incoming = sorted(decision.transfers_in, key=lambda i: sum(index[i].xp), reverse=True)
+    for out_id, in_id in zip(outgoing, incoming, strict=False):
+        gain = sum(index[in_id].xp) - sum(index[out_id].xp)
+        transfers.append(f"{name(out_id)} → {name(in_id)}  ({gain:+.1f} xP)")
+    if decision.hit_cost:
+        transfers.append(f"taking a -{decision.hit_cost} hit")
+
+    captain = forecasts.get(decision.captain)
+    captain_line = ""
+    if captain:
+        captain_line = (
+            f"{captain.name} ({captain.xp[0]:.1f} xP, doubled to {captain.xp[0] * 2:.1f})"
+        )
+
+    # The evidence that drove a transfer, not every adjustment the run made.
+    reasons: list[str] = []
+    for player_id in list(decision.transfers_out) + list(decision.transfers_in):
+        adjustment = report.adjustments.get(player_id)
+        if adjustment and adjustment.reasons:
+            reasons.append(f"{name(player_id)}: {adjustment.reasons[0][:120]}")
+
+    # Anything that degraded belongs in the message, not only in a log.
+    warnings = [
+        note.replace("[yellow]", "")
+        .replace("[/yellow]", "")
+        .replace("[red]", "")
+        .replace("[/red]", "")
+        for note in notes
+        if "[yellow]" in note or "[red]" in note
+    ]
+    warnings += list(validation.warnings)
+
+    summary = Summary(
+        gameweek=gameweek,
+        deadline=deadline,
+        headline=(
+            f"{len(decision.transfers_in)} transfer(s)"
+            if decision.transfers_in
+            else "no transfers"
+        ),
+        transfers=transfers,
+        captain=captain_line,
+        chip=plan.chip,
+        expected_points=decision.expected_points,
+        horizon_points=plan.total_expected_points,
+        reasons=reasons,
+        warnings=warnings,
+        submitted=False,
+    )
+
+    try:
+        telegram.send(summary.to_markdown())
+        console.print("[green]summary sent to Telegram[/green]")
+    except NotifyError as exc:
+        console.print(f"[red]could not send the summary[/red]: {exc}")

@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 
+from ..config import REPO_ROOT
 from .evidence import Tier
 from .sources import USER_AGENT, Document
+from .transcripts import TranscriptFetcher, strip_boilerplate
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +31,12 @@ REDDIT_API = "https://oauth.reddit.com"
 # `reddit.com/r/x/hot.json` trick no longer works from anywhere it cannot
 # identify. A registered script app is now the only reliable read path.
 REDDIT_APP_URL = "https://www.reddit.com/prefs/apps"
+
+# Deliberately NOT under data/cache/, which is gitignored as regenerable.
+# Transcripts are neither regenerable from the cloud (YouTube blocks hosted IPs)
+# nor secret (they are public captions), so they are committed to the repo. That
+# is what lets a local machine harvest them and a scheduled cloud run use them.
+DEFAULT_TRANSCRIPT_CACHE = REPO_ROOT / "data" / "transcripts"
 
 
 class RedditClient:
@@ -150,26 +159,36 @@ def fetch_youtube_documents(
     max_age_days: int = 5,
     per_channel: int = 3,
     with_transcripts: bool = True,
+    cache_dir: Path | None = None,
+    proxy: str | None = None,
+    cache_only: bool = False,
 ) -> tuple[list[Document], str | None]:
-    """Fetch recent creator videos, with transcripts when available.
+    """Fetch recent creator videos, preferring transcripts over descriptions.
 
-    The Data API returns titles and descriptions but **not** captions, so
-    transcripts come from the optional ``youtube-transcript-api`` package. A
-    description alone is thin — the actual claims are in what the creator says.
+    Two endpoints are used, deliberately. ``search`` finds recent videos but
+    truncates descriptions to ~120 characters; ``videos`` returns them in full.
+    Even then a full description is mostly sponsorship copy, so boilerplate is
+    stripped and the transcript is what actually carries claims.
 
-    Caveats worth keeping in view, all of which the tier rules already handle:
-    creator content is stale on arrival (a Monday video is often obsolete by
-    Friday's press conference), auto-captions mangle player names constantly, and
-    creators are rewarded for bold calls rather than for calibration.
+    Transcripts are cached permanently and fetched slowly — see
+    :mod:`arsenal.research.transcripts` for why that matters.
     """
     if not api_key or not channel_ids:
         return [], None
 
     published_after = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
     documents: list[Document] = []
-    blocked: str | None = None
+    fetcher = (
+        TranscriptFetcher(
+            cache_dir or DEFAULT_TRANSCRIPT_CACHE, proxy=proxy, cache_only=cache_only
+        )
+        if with_transcripts
+        else None
+    )
+
     try:
         with httpx.Client(timeout=20.0) as client:
+            found: list[tuple[str, str, datetime]] = []
             for channel_id in channel_ids:
                 response = client.get(
                     "https://www.googleapis.com/youtube/v3/search",
@@ -185,69 +204,65 @@ def fetch_youtube_documents(
                 )
                 response.raise_for_status()
                 for item in response.json().get("items", []):
-                    snippet = item.get("snippet", {})
                     video_id = item.get("id", {}).get("videoId")
+                    snippet = item.get("snippet", {})
                     if not video_id:
                         continue
-
-                    body = f"{snippet.get('title', '')}\n\n{snippet.get('description', '')}"
-                    if with_transcripts and not blocked:
-                        transcript, problem = _transcript(video_id)
-                        if transcript:
-                            body = f"{snippet.get('title', '')}\n\n{transcript}"
-                        elif problem:
-                            # One block means every later request is blocked too;
-                            # continuing would just be slow.
-                            blocked = problem
-
-                    documents.append(
-                        Document(
-                            text=body[:8000],
-                            url=f"https://www.youtube.com/watch?v={video_id}",
-                            source_name=snippet.get("channelTitle", "YouTube"),
-                            published_at=datetime.fromisoformat(
+                    found.append(
+                        (
+                            video_id,
+                            snippet.get("channelTitle", "YouTube"),
+                            datetime.fromisoformat(
                                 snippet["publishedAt"].replace("Z", "+00:00")
                             ),
-                            tier=Tier.OPINION,
                         )
                     )
+
+            # One `videos` call covers up to 50 ids and returns full descriptions,
+            # which `search` truncates.
+            details: dict[str, dict] = {}
+            if found:
+                response = client.get(
+                    "https://www.googleapis.com/youtube/v3/videos",
+                    params={
+                        "key": api_key,
+                        "id": ",".join(v for v, _, _ in found[:50]),
+                        "part": "snippet",
+                    },
+                )
+                response.raise_for_status()
+                for item in response.json().get("items", []):
+                    details[item["id"]] = item.get("snippet", {})
+
+        for video_id, channel, published in found:
+            snippet = details.get(video_id, {})
+            title = snippet.get("title", "")
+            description = strip_boilerplate(snippet.get("description", ""))
+
+            body = f"{title}\n\n{description}".strip()
+            if fetcher:
+                transcript = fetcher.fetch(
+                    video_id, published_at=published, title=title, channel=channel
+                )
+                if transcript:
+                    # The transcript supersedes the description entirely — the
+                    # latter is advertising with a sentence of content in it.
+                    body = f"{title}\n\n{transcript}"
+
+            if len(body) < 40:
+                continue
+
+            documents.append(
+                Document(
+                    text=body[:12000],
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    source_name=channel,
+                    published_at=published,
+                    tier=Tier.OPINION,
+                )
+            )
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         log.warning("youtube fetch failed: %s", exc)
         return documents, str(exc)
 
-    # Titles and descriptions without transcripts are around 120 characters of
-    # promotional text. Saying so is more useful than quietly adding noise.
-    return documents, blocked
-
-
-def _transcript(video_id: str) -> tuple[str | None, str | None]:
-    """Fetch a video transcript. Returns ``(text, problem)``.
-
-    The problem is returned rather than swallowed because the difference between
-    "this video has no captions" and "YouTube has blocked us" matters enormously,
-    and both previously degraded to a 122-character description with no signal
-    that anything had gone wrong.
-    """
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-    except ImportError:
-        return None, "youtube-transcript-api is not installed"
-
-    try:
-        fetched = YouTubeTranscriptApi().fetch(video_id, languages=["en", "en-GB", "en-US"])
-        return " ".join(chunk.text for chunk in fetched), None
-    except Exception as exc:  # the library raises many distinct error types
-        kind = type(exc).__name__
-        if "IpBlocked" in kind or "TooManyRequests" in kind:
-            # Terminal for this run and every video in it. YouTube blocks the
-            # whole IP, and it blocks cloud-provider ranges by default — so a
-            # scheduled agent on hosted CI will never see a transcript.
-            return None, (
-                "YouTube has blocked this IP from transcript requests. It rate "
-                "limits scraping aggressively and blocks cloud providers by "
-                "default, so transcripts are unreliable here and unavailable "
-                "from hosted CI. Video titles and descriptions still work, but "
-                "carry very little signal."
-            )
-        log.debug("no transcript for %s: %s", video_id, exc)
-        return None, None
+    return documents, (fetcher.blocked if fetcher else None)

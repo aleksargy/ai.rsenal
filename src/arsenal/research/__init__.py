@@ -27,11 +27,20 @@ from .newsfeeds import DEFAULT_FEEDS, fetch_news_documents, is_relevant
 from .providers import AnthropicBackend, ExtractionBackend, GeminiBackend, build_backend
 from .resolver import PlayerResolver, Resolution, normalise, resolve_all
 from .sources import Document, FPLNewsSource, SetPieceSource, SourceResult
+from .transcripts import (
+    DEFAULT_RETENTION_DAYS,
+    CacheEntry,
+    TranscriptCache,
+    TranscriptFetcher,
+    strip_boilerplate,
+)
 
 __all__ = [
     "DEFAULT_FEEDS",
+    "DEFAULT_RETENTION_DAYS",
     "Adjustment",
     "AnthropicBackend",
+    "CacheEntry",
     "ClubArticle",
     "Document",
     "Evidence",
@@ -47,6 +56,8 @@ __all__ = [
     "SetPieceSource",
     "SourceResult",
     "Tier",
+    "TranscriptCache",
+    "TranscriptFetcher",
     "apply_to_forecasts",
     "build_backend",
     "build_client",
@@ -64,5 +75,6 @@ __all__ = [
     "may_adjust_forecast",
     "normalise",
     "resolve_all",
+    "strip_boilerplate",
     "summarise_evidence",
 ]

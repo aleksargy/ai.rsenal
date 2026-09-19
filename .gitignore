@@ -21,6 +21,10 @@ session.json
 # Cached API payloads. Regenerable, and large.
 data/cache/
 
+# data/transcripts/ is deliberately NOT ignored. YouTube blocks cloud IPs, so a
+# hosted run cannot fetch captions - it reads these, harvested by a local run
+# and committed. They are public data, immutable, and a few KB each.
+
 # Raw payloads are persisted per run for debugging a schema change. Keep the
 # parsed decision artifacts (data/runs/**/*.json) as the audit trail, but not
 # the multi-megabyte bootstrap dumps that produced them.

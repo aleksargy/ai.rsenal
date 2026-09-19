@@ -1,0 +1,64 @@
+name: Harvest transcripts
+
+# Runs on YOUR machine, and only does the one job that genuinely requires a
+# residential IP: fetching YouTube captions. YouTube blocks cloud provider
+# ranges outright, so a hosted runner can never do this.
+#
+# Everything harvested is committed to data/transcripts/. The scheduled
+# deadline run then reads them from the repository, wherever it happens to be
+# running. That split is what lets the main pipeline live in the cloud and keep
+# working when this machine is off - a week with the laptop shut costs
+# transcript freshness, not the run.
+#
+# Transcripts are public captions and never change once published, so committing
+# them is safe and they only ever need fetching once.
+#
+# The harvest also prunes: creators publish several times a week, so without a
+# retention window the committed archive grows by hundreds of dead files a
+# season. Aged-out captions are deleted here and the deletions are committed
+# alongside the additions.
+
+on:
+  schedule:
+    # A few times a day. Creators post before deadlines, and there is no benefit
+    # to checking more often than they publish.
+    - cron: "0 7,13,19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fpl-transcripts
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    env:
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: uv sync --extra youtube
+
+      - name: Harvest
+        run: uv run arsenal transcripts
+
+      - name: Commit anything new
+        run: |
+          git config user.name  "ai.rsenal"
+          git config user.email "noreply@github.com"
+          # -A is explicit rather than necessary: since git 2.0 a pathspec
+          # already stages deletions. Spelled out because a harvest that prunes
+          # and commits only the additions would silently resurrect stale
+          # captions on the next checkout.
+          git add -A data/transcripts/
+          git diff --staged --quiet || git commit -m "Harvest and prune YouTube transcripts"
+          # Rebase before pushing: the deadline workflow may have committed in
+          # the meantime, and a failed push here silently strands the captions
+          # on this machine.
+          git pull --rebase --autostash
+          git push

@@ -73,6 +73,15 @@ research:
   # it to 4, re-run `arsenal backtest`, and let the numbers decide.
   max_tier_that_moves_forecast: 4
 
+  # HTTP(S) proxy for YouTube transcript requests, e.g.
+  #   transcript_proxy: http://user:pass@proxy.example.com:8080
+  #
+  # YouTube rate-limits transcript scraping per IP and blocks cloud-provider
+  # ranges outright. The block is not client-specific, so a different IP is the
+  # only durable fix. Leave unset to fetch directly - fine from a home
+  # connection, as long as the cache is warm and requests stay paced.
+  # transcript_proxy:
+
   # Which provider extracts claims: auto | anthropic | gemini
   #   auto     prefers Anthropic for quality, falls back to Gemini
   #   gemini   Google AI Studio has a genuinely free tier whose rate limits

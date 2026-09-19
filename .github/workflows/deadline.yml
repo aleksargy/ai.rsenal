@@ -1,0 +1,78 @@
+name: FPL deadline
+
+# WHERE THIS RUNS
+#
+# `runs-on` below is `self-hosted` by default. Change it to `ubuntu-latest` to
+# run in GitHub's cloud instead. The trade is real, and worth understanding
+# before choosing:
+#
+#   self-hosted (your machine)
+#     + YouTube transcripts work - YouTube blocks cloud IP ranges permanently
+#     + the rotated refresh token persists in .env, no extra credential needed
+#     - only runs while your machine is on
+#
+#   ubuntu-latest (GitHub's cloud)
+#     + always on, nothing to maintain
+#     - no YouTube transcripts without a proxy (research.transcript_proxy)
+#     - needs ARSENAL_GH_PAT so each run can store the rotated refresh token.
+#       If that write ever fails, the agent locks out until you re-capture a
+#       session by hand - so the run reports it loudly rather than continuing.
+#
+# Everything else is identical.
+
+on:
+  schedule:
+    # Hourly. The job decides whether anything is due, because FPL deadlines
+    # move for midweek and holiday rounds - a fixed cron drifts off them within
+    # weeks and eventually misses one.
+    - cron: "5 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run regardless of how far away the deadline is"
+        type: boolean
+        default: false
+
+concurrency:
+  # Two overlapping runs would race on the session and could each refresh the
+  # token, revoking the other's copy.
+  group: fpl-deadline
+  cancel-in-progress: false
+
+jobs:
+  deadline:
+    runs-on: self-hosted
+    timeout-minutes: 45
+
+    env:
+      FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
+      FPL_SESSION_JSON: ${{ secrets.FPL_SESSION_JSON }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Only needed on a hosted runner: lets the run store the rotated refresh
+      # token. A fine-grained PAT with "Secrets: read and write" on this repo.
+      ARSENAL_GH_PAT: ${{ secrets.ARSENAL_GH_PAT }}
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: uv sync --extra agents --extra browser --extra youtube --extra ci
+
+      - name: Decide whether anything is due
+        id: due
+        run: uv run arsenal schedule --output github
+
+      - name: Run the pipeline
+        if: steps.due.outputs.stage != 'idle' || inputs.force
+        run: uv run arsenal run --notify
+
+      - name: Report a failure
+        # A run that dies silently is indistinguishable from one that never
+        # fired. Failure goes to the same place the good news would have.
+        if: failure()
+        run: uv run arsenal notify --failure "Deadline run failed - check the workflow logs"

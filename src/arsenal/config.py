@@ -146,6 +146,14 @@ class ResearchSettings:
     opinion is gated. Raise it and re-run `arsenal backtest` - that is the only
     way to find out whether it helps."""
 
+    transcript_proxy: str | None = None
+    """HTTP(S) proxy for YouTube transcript requests.
+
+    YouTube blocks transcript scraping per IP, and blocks cloud-provider ranges
+    by default. The block is not client-specific - youtube-transcript-api,
+    yt-dlp and a browser-issued fetch all receive the same 429 - so a different
+    IP is the only durable fix. Any proxy URL works."""
+
     provider: str = "auto"
     """Which model provider extracts claims: auto, anthropic, or gemini.
 

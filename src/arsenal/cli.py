@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from itertools import zip_longest
@@ -22,8 +23,11 @@ from rich.table import Column, Table
 from .cli_auth import auth_app
 from .cli_channels import channels as channels_command
 from .cli_explain import explain as explain_command
+from .cli_notify import notify as notify_command
 from .cli_run import run as run_command
+from .cli_schedule import schedule as schedule_command
 from .cli_sources import sources as sources_command
+from .cli_transcripts import transcripts as transcripts_command
 from .config import Config
 from .forecast import build_league_model, forecast_players, load_history, upcoming_fixtures
 from .forecast.backtest import backtest as run_backtest
@@ -79,6 +83,9 @@ app.command("explain")(explain_command)
 app.command("run")(run_command)
 app.command("sources")(sources_command)
 app.command("channels")(channels_command)
+app.command("notify")(notify_command)
+app.command("schedule")(schedule_command)
+app.command("transcripts")(transcripts_command)
 
 
 def _client(config: Config, *, gameweek: int | None = None) -> FPLClient:
@@ -613,13 +620,34 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, r
             notes.append(f"[green]reddit[/green]: {len(reddit_docs)} documents")
         documents.extend(reddit_docs)
 
+    # A hosted runner cannot fetch transcripts, so it reads the committed cache
+    # instead of pointlessly attempting requests YouTube will refuse.
+    hosted = bool(os.environ.get("CI")) and not config.research.transcript_proxy
     videos, youtube_error = fetch_youtube_documents(
-        config.secrets.youtube_api_key, config.research.youtube_channels
+        config.secrets.youtube_api_key,
+        config.research.youtube_channels,
+        proxy=config.research.transcript_proxy,
+        cache_only=hosted,
     )
     if youtube_error:
         notes.append(f"[yellow]youtube degraded[/yellow]: {youtube_error}")
     if videos:
-        notes.append(f"[green]youtube[/green]: {len(videos)} documents")
+        note = f"[green]youtube[/green]: {len(videos)} documents"
+        from .research.community import DEFAULT_TRANSCRIPT_CACHE
+        from .research.transcripts import TranscriptFetcher
+
+        age = TranscriptFetcher(DEFAULT_TRANSCRIPT_CACHE, cache_only=True).freshest
+        if age is not None:
+            # Age of the newest cached *video*, not of the last harvest. A run
+            # reading week-old captions should say so - on a hosted run the
+            # cache is only as current as the last local harvest managed to
+            # commit, and silently treating that as live reporting is exactly
+            # how a stale opinion gets weighted as a fresh one.
+            days = age / 24
+            stale = days > 3
+            colour = "yellow" if stale else "dim"
+            note += f" · [{colour}]newest transcript {days:.1f}d old[/{colour}]"
+        notes.append(note)
     documents.extend(videos)
 
     if documents:

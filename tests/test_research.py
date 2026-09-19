@@ -386,3 +386,110 @@ class TestLiveStateIsNotADatedReport:
         assert not record.is_stale(), "a current injury must not be discarded as stale"
         # The announcement date is still preserved, just not used as the timestamp.
         assert "announced 01 Aug" in record.claim
+
+
+class TestGameweekScoping:
+    """Week-specific claims must not apply to every week.
+
+    `scout_risks` carries loan ineligibility scoped to one gameweek — a player
+    barred from facing their parent club in GW27 is perfectly available in GW6.
+    Applying such a claim unscoped benched a fit player for the rest of the
+    season, which is exactly what happened before this was wired up.
+    """
+
+    def scoped(self, gameweek: int) -> Evidence:
+        return make_evidence(
+            claim="Unavailable: cannot face their parent club as a loan condition",
+            gameweek=gameweek,
+        )
+
+    def test_applies_only_to_its_own_gameweek(self) -> None:
+        claim = self.scoped(27)
+        assert claim.applies_to(27) is True
+        assert claim.applies_to(6) is False
+
+    def test_unscoped_claims_apply_everywhere(self) -> None:
+        assert make_evidence().applies_to(6) is True
+        assert make_evidence().applies_to(27) is True
+
+    def test_out_of_scope_claims_do_not_adjust(self) -> None:
+        report = build_report([self.scoped(27)], now=NOW, gameweek=6)
+        assert report.out_of_scope == 1
+        # No adjustment entry at all, rather than an entry that happens to be
+        # neutral — a player with no applicable evidence has not been assessed.
+        assert 1 not in report.adjustments
+        assert report.changed_players == []
+
+    def test_in_scope_claims_do_adjust(self) -> None:
+        report = build_report([self.scoped(27)], now=NOW, gameweek=27)
+        assert report.out_of_scope == 0
+        assert report.adjustments[1].availability_multiplier == 0.0
+
+    def test_a_future_dated_claim_is_never_stale(self) -> None:
+        """A scheduled fact does not perish the way a fitness report does."""
+        old_but_scoped = make_evidence(
+            published_at=NOW - timedelta(days=90),
+            gameweek=27,
+            claim="Unavailable: loan conditions",
+        )
+        assert old_but_scoped.is_stale(now=NOW) is False
+
+    def test_no_gameweek_given_means_no_filtering(self) -> None:
+        """Callers that do not know the gameweek must not silently drop evidence."""
+        report = build_report([self.scoped(27)], now=NOW, gameweek=None)
+        assert report.out_of_scope == 0
+
+
+class TestHtmlToText:
+    """Turning club-site HTML into something an extractor can read."""
+
+    def test_decodes_all_entities(self) -> None:
+        """Hand-rolled replacements missed numeric entities.
+
+        Sangaré arrived at the extractor as "Sangar&#233;", which then fails to
+        resolve to an element id and the claim is dropped.
+        """
+        from arsenal.research import html_to_text
+
+        assert "Sangaré" in html_to_text("<p>Mamadou Sangar&#233; starts</p>")
+        assert "&" in html_to_text("<p>Tottenham &amp; Brentford</p>")
+
+    def test_strips_scripts_and_styles(self) -> None:
+        from arsenal.research import html_to_text
+
+        markup = "<script>var x = 'injured';</script><style>p{}</style><p>Real text</p>"
+        result = html_to_text(markup)
+        assert "Real text" in result
+        assert "var x" not in result
+
+    def test_collapses_blank_lines(self) -> None:
+        from arsenal.research import html_to_text
+
+        assert "\n\n\n" not in html_to_text("<div><p>a</p><br><br><br><p>b</p></div>")
+
+
+class TestClubArticleGrouping:
+    def test_groups_shared_links_and_strips_tracking(self) -> None:
+        """One press conference covers a whole club's flagged players.
+
+        FPL appends per-player UTM parameters, so grouping on the raw URL would
+        fetch the same article six times.
+        """
+        from arsenal.research import club_article_links
+
+        base = "https://www.avfc.co.uk/news/prematch-team-news/"
+        raw = [
+            {"id": 1, "team": 2, "scout_news_link": f"{base}?utm_content=a"},
+            {"id": 2, "team": 2, "scout_news_link": f"{base}?utm_content=b"},
+            {"id": 3, "team": 2, "scout_news_link": None},
+        ]
+        articles = club_article_links(raw, {2: "AVL"})
+        assert len(articles) == 1
+        assert articles[0].url == base
+        assert sorted(articles[0].player_ids) == [1, 2]
+        assert articles[0].club == "AVL"
+
+    def test_players_without_a_link_are_skipped(self) -> None:
+        from arsenal.research import club_article_links
+
+        assert club_article_links([{"id": 1, "team": 2}], {2: "AVL"}) == []

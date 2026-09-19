@@ -37,12 +37,15 @@ from .optimizer import (
 from .research import (
     FPLNewsSource,
     PlayerResolver,
+    ScoutRiskSource,
     SetPieceSource,
     apply_to_forecasts,
     build_client,
     build_report,
+    club_article_links,
     deduplicate,
     extract_claims,
+    fetch_club_articles,
     fetch_reddit_documents,
     fetch_youtube_documents,
     summarise_evidence,
@@ -345,6 +348,7 @@ def plan(
         nxt = bootstrap.next_event
         history = load_history(client, bootstrap)
         all_fixtures = client.fixtures()
+        raw_elements = client.raw_elements()
 
         my_team = None
         if not fresh and config.secrets.team_id:
@@ -392,8 +396,10 @@ def plan(
             bootstrap, history, league, schedule, horizon=opt_config.horizon
         )
         if research:
-            _, evidence, notes = _gather_evidence(config, bootstrap, use_llm=llm, quiet=True)
-            report = build_report(evidence)
+            _, evidence, notes = _gather_evidence(
+                config, bootstrap, use_llm=llm, quiet=True, raw=raw_elements
+            )
+            report = build_report(evidence, gameweek=start)
             apply_to_forecasts(forecasts, report)
             changed = len(report.changed_players)
             for note in notes:
@@ -520,17 +526,22 @@ def plan(
     )
 
 
-def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False):
+def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False, raw=None):
     """Collect evidence from every configured source, reporting what failed.
 
     Sources degrade to empty rather than raising: one dead scraper must not cost
     a gameweek. What was lost is returned so the caller can say so.
     """
     resolver = PlayerResolver.from_bootstrap(bootstrap)
+    raw = raw or []
     evidence = []
     notes: list[str] = []
 
-    for source in (FPLNewsSource(bootstrap), SetPieceSource(bootstrap)):
+    for source in (
+        FPLNewsSource(bootstrap),
+        SetPieceSource(bootstrap),
+        ScoutRiskSource(bootstrap, raw),
+    ):
         result = source.safe_gather(resolver)
         if result.ok:
             evidence.extend(result.evidence)
@@ -549,11 +560,26 @@ def _gather_evidence(config, bootstrap, *, use_llm: bool, quiet: bool = False):
         )
         return resolver, deduplicate(evidence), notes
 
-    documents, reddit_error = fetch_reddit_documents(config.research.subreddits)
+    # Official club articles first — FPL links the manager's own press conference
+    # on the club's own site, which is the best team-news source available and
+    # needs no third-party scraping.
+    teams = {t.id: t.short_name for t in bootstrap.teams}
+    articles = club_article_links(raw, teams)
+    documents, article_problems = fetch_club_articles(articles)
+    if documents:
+        notes.append(
+            f"[green]club news[/green]: {len(documents)} official articles "
+            f"from {len(articles)} links"
+        )
+    if article_problems:
+        notes.append(f"[yellow]{len(article_problems)} club articles unreachable[/yellow]")
+
+    reddit_docs, reddit_error = fetch_reddit_documents(config.research.subreddits)
     if reddit_error:
         notes.append(f"[red]reddit failed[/red]: {reddit_error}")
     else:
-        notes.append(f"[green]reddit[/green]: {len(documents)} documents")
+        notes.append(f"[green]reddit[/green]: {len(reddit_docs)} documents")
+    documents.extend(reddit_docs)
 
     videos, youtube_error = fetch_youtube_documents(
         config.secrets.youtube_api_key, config.research.youtube_channels
@@ -594,8 +620,14 @@ def research(
     config = Config.load()
     with _client(config) as client:
         bootstrap = client.bootstrap()
+        raw_elements = client.raw_elements()
 
-    resolver, evidence, notes = _gather_evidence(config, bootstrap, use_llm=llm)
+    nxt = bootstrap.next_event
+    gameweek = nxt.id if nxt else None
+
+    resolver, evidence, notes = _gather_evidence(
+        config, bootstrap, use_llm=llm, raw=raw_elements
+    )
     for note in notes:
         console.print(f"  {note}")
 
@@ -607,7 +639,7 @@ def research(
         f"T3 {summary.get('tier3', 0)} · T4 {summary.get('tier4', 0)})"
     )
 
-    report = build_report(evidence)
+    report = build_report(evidence, gameweek=gameweek)
     changed = sorted(report.changed_players, key=lambda a: a.availability_multiplier)[:top]
 
     if changed:
@@ -639,6 +671,8 @@ def research(
         )
     if report.stale_dropped:
         console.print(f"[dim]{report.stale_dropped} stale claims discarded[/dim]")
+    if report.out_of_scope:
+        console.print(f"[dim]{report.out_of_scope} claims apply to a different gameweek[/dim]")
 
 
 @app.command()

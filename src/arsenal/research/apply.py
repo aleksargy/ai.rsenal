@@ -88,6 +88,9 @@ class ResearchReport:
 
     stale_dropped: int = 0
 
+    out_of_scope: int = 0
+    """Claims that are true, but about a different gameweek."""
+
     @property
     def changed_players(self) -> list[Adjustment]:
         return [a for a in self.adjustments.values() if a.changed]
@@ -132,13 +135,28 @@ def _multiplier_for(evidence: Evidence) -> float:
     return min(1.0, 1.0 + direction * force * 0.5)
 
 
-def build_report(evidence: list[Evidence], *, now: datetime | None = None) -> ResearchReport:
-    """Turn evidence into per-player adjustments, enforcing the tier rules."""
+def build_report(
+    evidence: list[Evidence],
+    *,
+    now: datetime | None = None,
+    gameweek: int | None = None,
+) -> ResearchReport:
+    """Turn evidence into per-player adjustments, enforcing the tier rules.
+
+    ``gameweek`` scopes week-specific claims. Without it, a loan-ineligible
+    player barred from one fixture in GW27 is treated as unavailable *every*
+    week — which silently benches a fit player for the rest of the season.
+    """
     moment = now or datetime.now(UTC)
     report = ResearchReport()
 
     for item in evidence:
         if item.player_id is None:
+            continue
+
+        if not item.applies_to(gameweek):
+            # Correct for a different gameweek, irrelevant to this one.
+            report.out_of_scope += 1
             continue
 
         adjustment = report.adjustments.setdefault(

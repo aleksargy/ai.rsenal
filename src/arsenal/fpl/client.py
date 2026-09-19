@@ -183,6 +183,17 @@ class FPLClient:
             self.get("/bootstrap-static/", cache_key="bootstrap", ttl=ttl)
         )
 
+    def raw_elements(self, *, ttl: int | None = None) -> list[dict[str, Any]]:
+        """The unparsed `elements` array.
+
+        The typed model deliberately ignores rarely-populated nested structures
+        like `scout_risks`, but those carry real signal — gameweek-scoped loan
+        ineligibility, and links to official club press-conference articles. This
+        exposes them without loosening the schema everything else depends on.
+        """
+        payload = self.get("/bootstrap-static/", cache_key="bootstrap", ttl=ttl)
+        return list(payload.get("elements", []))
+
     def fixtures(self, event: int | None = None, *, ttl: int | None = None) -> list[Fixture]:
         path = "/fixtures/" if event is None else f"/fixtures/?event={event}"
         key = "fixtures" if event is None else f"fixtures_{event}"

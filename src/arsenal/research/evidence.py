@@ -78,6 +78,15 @@ class Evidence(BaseModel):
     player_id: int | None = None
     team_id: int | None = None
 
+    gameweek: int | None = None
+    """The gameweek this claim applies to, when it applies to only one.
+
+    Some constraints are week-specific rather than ongoing — a loan-ineligible
+    player cannot face their parent club in one particular gameweek and is
+    perfectly available in every other. Applying such a claim to the whole
+    horizon would wrongly bench a fit player for a month.
+    """
+
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     """The extractor's own certainty that the claim is correctly *read* from the
     source. Not a probability the claim is true — tier carries that."""
@@ -108,6 +117,15 @@ class Evidence(BaseModel):
     def age(self, *, now: datetime | None = None) -> timedelta:
         return (now or datetime.now(UTC)) - self.published_at
 
+    def applies_to(self, gameweek: int | None) -> bool:
+        """Whether this claim bears on the given gameweek.
+
+        A claim with no gameweek is ongoing and applies to all of them.
+        """
+        if self.gameweek is None or gameweek is None:
+            return True
+        return self.gameweek == gameweek
+
     def is_stale(
         self, *, now: datetime | None = None, max_age: timedelta | None = None
     ) -> bool:
@@ -117,6 +135,10 @@ class Evidence(BaseModel):
         it, since a set-piece or form observation ages far more gracefully than
         an injury report.
         """
+        # A claim scoped to a specific future gameweek describes a scheduled
+        # fact, not a perishable report. "Ineligible in GW27" does not decay.
+        if self.gameweek is not None:
+            return False
         limit = max_age or DEFAULT_MAX_AGE
         if self.impact not in FAST_DECAYING:
             limit *= 2

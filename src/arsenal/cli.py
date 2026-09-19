@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from itertools import zip_longest
 from typing import Annotated
 
 import typer
@@ -18,8 +19,9 @@ from rich.table import Table
 
 from .config import Config
 from .fpl.client import AuthRequired, FPLClient, FPLError
-from .fpl.rules import available_chips, valid_formations
+from .fpl.rules import SquadPlayer, available_chips, valid_formations, validate_squad
 from .money import format_money
+from .optimizer import OptimiserConfig, OptimiserError, build_candidates, optimise
 
 app = typer.Typer(
     name="arsenal",
@@ -265,6 +267,181 @@ def deadline() -> None:
     console.print(
         f"[bold]GW{nxt.id}[/bold] deadline {nxt.deadline_time:%Y-%m-%d %H:%M UTC}\n"
         f"T−{hours:.1f}h → [cyan]{due}[/cyan]"
+    )
+
+
+@app.command()
+def plan(
+    horizon: Annotated[int, typer.Option("--horizon", "-h", help="Gameweeks to plan over")] = 0,
+    chip: Annotated[
+        str | None, typer.Option("--chip", help="Force a chip this gameweek")
+    ] = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Build from scratch on a full budget")
+    ] = False,
+    max_hit: Annotated[
+        int | None, typer.Option("--max-hit", help="Points spendable on hits")
+    ] = None,
+) -> None:
+    """Solve for the best squad and print the proposed gameweek.
+
+    Uses the placeholder forecast from ``optimizer.baseline`` — good enough to
+    exercise the solver end to end, not yet good enough to trust unattended.
+    M3 replaces it.
+    """
+    config = Config.load()
+    settings = config.optimiser
+
+    with _client(config) as client:
+        bootstrap = client.bootstrap()
+        elements = bootstrap.element_by_id()
+        teams = bootstrap.team_by_id()
+        nxt = bootstrap.next_event
+
+        my_team = None
+        if not fresh and config.secrets.team_id:
+            try:
+                my_team = client.my_team(config.secrets.team_id)
+            except AuthRequired:
+                console.print(
+                    "[yellow]no valid session[/yellow] — planning a fresh squad "
+                    "on a full budget instead of optimising your actual team.\n"
+                )
+
+    # Without a squad to start from there is nothing to transfer out of, so the
+    # only coherent framing is a wildcard: 15 purchases on the full budget.
+    building_fresh = my_team is None
+    if building_fresh:
+        bank = bootstrap.game_config.rules.squad_total_spend
+        free_transfers = 1
+        chip = chip or "wildcard"
+    else:
+        # Only cash in hand: the value of the current squad enters the model
+        # through the sell variables, at selling rather than current price.
+        bank = my_team.transfers.bank
+        free_transfers = my_team.transfers.limit or 1
+
+    opt_config = OptimiserConfig(
+        horizon=horizon or settings.horizon,
+        discount=settings.discount,
+        risk_aversion=settings.risk_aversion,
+        bench_weight=settings.bench_weight,
+        max_hit=settings.max_hit if max_hit is None else max_hit,
+        max_free_transfers=bootstrap.game_config.rules.max_free_transfers,
+        solver_time_limit=settings.solver_time_limit,
+        squad_requirements=bootstrap.squad_requirements(),
+        play_limits=bootstrap.play_limits(),
+    )
+
+    candidates = build_candidates(bootstrap, my_team=my_team, horizon=opt_config.horizon)
+    console.print(
+        f"[dim]pool: {len(candidates)} players · horizon {opt_config.horizon} GW · "
+        f"bank {format_money(bank)} · {free_transfers} free transfer(s)"
+        + (f" · chip {chip}" if chip else "")
+        + "[/dim]\n"
+    )
+
+    try:
+        result = optimise(
+            candidates,
+            initial_bank=bank,
+            initial_free_transfers=free_transfers,
+            config=opt_config,
+            chip=chip,
+        )
+    except OptimiserError as exc:
+        console.print(f"[red]optimiser failed[/red]: {exc}")
+        raise typer.Exit(1) from exc
+
+    index = {c.element_id: c for c in candidates}
+    decision = result.this_week
+    gameweek = nxt.id if nxt else "?"
+
+    def describe(element_id: int) -> tuple[str, str, str, str]:
+        element = elements[element_id]
+        return (
+            element.element_type.short,
+            element.name,
+            teams[element.team].short_name if element.team in teams else "?",
+            format_money(element.now_cost),
+        )
+
+    table = Table("pos", "player", "club", "price", "xP", title=f"GW{gameweek} starting XI")
+    for element_id in sorted(decision.starting, key=lambda i: index[i].position):
+        position, name, club, price = describe(element_id)
+        if element_id == decision.captain:
+            name = f"[bold]{name} (C)[/bold]"
+        elif element_id == decision.vice_captain:
+            name = f"{name} (V)"
+        table.add_row(position, name, club, price, f"{index[element_id].points(0):.2f}")
+    console.print(table)
+
+    bench = Table("#", "pos", "player", "club", "price", "xP", title="Bench")
+    for order, element_id in enumerate(decision.bench, start=1):
+        position, name, club, price = describe(element_id)
+        bench.add_row(
+            str(order), position, name, club, price, f"{index[element_id].points(0):.2f}"
+        )
+    console.print(bench)
+
+    if decision.transfers_in or decision.transfers_out:
+        transfers = Table("out", "in", title="Transfers")
+        outgoing = sorted(decision.transfers_out)
+        incoming = sorted(decision.transfers_in)
+        for out_id, in_id in zip_longest(outgoing, incoming):
+            transfers.add_row(
+                describe(out_id)[1] if out_id else "—",
+                describe(in_id)[1] if in_id else "—",
+            )
+        console.print(transfers)
+    else:
+        console.print("[dim]no transfers this gameweek[/dim]")
+
+    cost = f", costing [red]-{decision.hit_cost}[/red]" if decision.hits else ""
+    console.print(
+        f"\n{len(decision.transfers_in)} transfer(s){cost} · "
+        f"bank {format_money(decision.bank)} · "
+        f"xP this GW [bold]{decision.expected_points:.1f}[/bold] · "
+        f"xP over {opt_config.horizon} GW [bold]{result.total_expected_points:.1f}[/bold]"
+    )
+
+    # Cross-check the solver against the independently written validator. A bug
+    # shared between the two would be invisible, which is the whole point of not
+    # sharing their code.
+    bench_rank = {pid: rank + 1 for rank, pid in enumerate(decision.bench)}
+    squad_players = [
+        SquadPlayer(
+            element_id=pid,
+            position=index[pid].position,
+            team=index[pid].team,
+            now_cost=index[pid].now_cost,
+            purchase_price=index[pid].purchase_price,
+            is_starting=pid in decision.starting,
+            is_captain=pid == decision.captain,
+            is_vice_captain=pid == decision.vice_captain,
+            bench_rank=bench_rank.get(pid),
+        )
+        for pid in decision.squad
+    ]
+    spent = sum(p.sells_for for p in squad_players)
+    validation = validate_squad(
+        squad_players,
+        budget=spent + decision.bank,
+        squad_requirements=bootstrap.squad_requirements(),
+        play_limits=bootstrap.play_limits(),
+        elements=elements,
+    )
+    if validation.ok:
+        console.print("[green]validated[/green] — squad satisfies every rule invariant")
+    else:
+        console.print(f"\n[red]VALIDATION FAILED[/red]\n{validation}")
+        raise typer.Exit(2)
+    for warning in validation.warnings:
+        console.print(f"[yellow]warn[/yellow] {warning}")
+
+    console.print(
+        "\n[dim]Forecast is the M3 placeholder: FPL's own ep_next blended with a "
+        "shrunk season rate. No research, fixtures, or team news yet.[/dim]"
     )
 
 

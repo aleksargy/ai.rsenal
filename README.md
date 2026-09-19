@@ -4,9 +4,11 @@ An autonomous Fantasy Premier League manager. It researches, decides, submits,
 and then tells you what it did and why — so a deadline never passes with an
 injured captain and three free transfers rotting in the bank.
 
-> **Status: M1 (foundation).** Read client, schemas, rules engine and validator
-> are built and tested. The optimiser, forecast, research agents and executor are
-> specified but not yet implemented. See [the roadmap](#roadmap).
+> **Status: M2 (optimiser).** Read client, schemas, rules engine, validator and
+> the multi-gameweek integer program are built and tested — `arsenal plan` solves
+> a legal optimal squad in ~2.5s. The forecast is still a placeholder; research
+> agents and the executor are specified but not implemented. See
+> [the roadmap](#roadmap).
 
 ## The idea
 
@@ -84,7 +86,21 @@ uv run arsenal doctor      # probe every endpoint, check schema drift and sessio
 uv run arsenal rules       # the live scoring table, straight from the game engine
 uv run arsenal deadline    # next deadline and which pipeline stage is due
 uv run arsenal status      # your squad, bank, free transfers, chips (needs a session)
+uv run arsenal plan        # solve for the optimal squad and print it
 ```
+
+`plan` needs no credentials if you pass `--fresh`, which builds a squad from a
+full £100.0m rather than optimising a team it cannot read:
+
+```bash
+uv run arsenal plan --fresh --horizon 5
+uv run arsenal plan --chip bboost      # evaluate a specific chip
+uv run arsenal plan --max-hit 0        # forbid hits entirely
+```
+
+Every plan is cross-checked by the independent validator before it is printed —
+if the solver and the rulebook ever disagree, the command fails loudly rather
+than showing you an illegal squad.
 
 `doctor` needs no credentials and is the right first command — it tells you
 whether a failure is your code or the API having moved underneath you.
@@ -143,7 +159,7 @@ prints it.
 ## Roadmap
 
 - [x] **M1** Read client, schemas, rules engine, independent validator, CLI, tests
-- [ ] **M2** Integer program; `arsenal plan` prints a legal optimal squad
+- [x] **M2** Integer program; `arsenal plan` prints a legal optimal squad
 - [ ] **M3** Bottom-up expected points, backtested against completed gameweeks
 - [ ] **M4** Source adapters and the agent research fan-out
 - [ ] **M5** Session management and the three-layer executor

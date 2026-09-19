@@ -7,7 +7,9 @@ traced to the setting that caused it. Secrets never touch the repo.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,9 +17,79 @@ from typing import Any
 
 import yaml
 
+log = logging.getLogger(__name__)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
+DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 DATA_DIR = REPO_ROOT / "data"
+
+
+def load_dotenv(path: Path | None = None) -> int:
+    """Load ``.env`` into the environment, without overwriting what is already set.
+
+    Real environment variables always win. That ordering matters in CI: GitHub
+    Actions injects secrets as environment variables, and a stale committed
+    ``.env`` silently overriding them would be a miserable thing to debug.
+
+    Deliberately not a dependency. The format here is ``KEY=value`` with optional
+    ``export``, ``#`` comments, and optional surrounding quotes — which is all
+    this project's secrets need, and a parser small enough to read in one sitting
+    beats a library for that.
+    """
+    target = path or DEFAULT_ENV_PATH
+    if not target.exists():
+        return 0
+
+    loaded = 0
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.removeprefix("export ").strip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        # Strip matching quotes, but leave inner ones alone — a session JSON
+        # blob is full of them.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
+def update_env_file(values: dict[str, str], path: Path | None = None) -> Path:
+    """Set keys in ``.env``, preserving everything else in the file.
+
+    Exists because the alternative — printing a credential and asking the user to
+    paste it — is bad on two counts. It puts a live token into terminal
+    scrollback, and a long single-line JSON value gets wrapped by the terminal
+    and pasted back as several lines, which no ``KEY=value`` parser can read.
+    Writing the file directly avoids both.
+    """
+    target = path or DEFAULT_ENV_PATH
+    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+
+    remaining = dict(values)
+    updated: list[str] = []
+    for line in lines:
+        stripped = line.strip().removeprefix("export ").strip()
+        key = stripped.partition("=")[0].strip()
+        if key in remaining:
+            updated.append(f"{key}={remaining.pop(key)}")
+        else:
+            updated.append(line)
+
+    updated.extend(f"{key}={value}" for key, value in remaining.items())
+
+    target.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    with contextlib.suppress(OSError):
+        target.chmod(0o600)
+    return target
 
 
 @dataclass
@@ -81,12 +153,28 @@ class AutonomySettings:
     """Print payloads instead of sending them. Always true until the first verified run."""
 
 
+def _oidc_from(parsed: Any) -> dict[str, Any]:
+    """Pull the OIDC token block out of a parsed FPL_SESSION_JSON payload.
+
+    Handles both the current shape (an `oidc` block carrying the refresh token)
+    and the earlier one that stored a bare `access_token`.
+    """
+    if not isinstance(parsed, dict):
+        return {}
+    if isinstance(parsed.get("oidc"), dict):
+        return dict(parsed["oidc"])
+    if parsed.get("access_token"):
+        return {"access_token": parsed["access_token"]}
+    return {}
+
+
 @dataclass
 class Secrets:
     """Loaded from the environment. Never written to disk, never logged."""
 
     team_id: int | None = None
     session_cookies: dict[str, str] = field(default_factory=dict)
+    oidc: dict[str, Any] = field(default_factory=dict)
     anthropic_api_key: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -96,30 +184,41 @@ class Secrets:
 
     @classmethod
     def from_env(cls) -> Secrets:
+        load_dotenv()
         team_id = os.environ.get("FPL_TEAM_ID")
         session_raw = os.environ.get("FPL_SESSION_JSON", "")
         cookies: dict[str, str] = {}
+        # Bound before the branch: having no session at all is the normal state
+        # on a fresh checkout, and it must not be the one path that crashes.
+        parsed: Any = None
         if session_raw:
             try:
                 parsed = json.loads(session_raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    "FPL_SESSION_JSON is not valid JSON. Regenerate it with "
-                    "`arsenal auth export`."
-                ) from exc
+            except json.JSONDecodeError:
+                # Degrade rather than raise. A mangled session should cost you
+                # authenticated reads, not every command in the CLI — including
+                # the `auth` commands you need to repair it.
+                log.warning(
+                    "FPL_SESSION_JSON is not valid JSON and has been ignored. "
+                    "Re-capture with `arsenal auth attach`."
+                )
+                parsed = None
             # Accept either a flat cookie mapping or a Playwright storage_state.
-            if isinstance(parsed, dict) and "cookies" in parsed:
+            if isinstance(parsed, dict) and isinstance(parsed.get("cookies"), list):
                 cookies = {
                     c["name"]: c["value"]
                     for c in parsed["cookies"]
                     if "premierleague.com" in c.get("domain", "")
                 }
+            elif isinstance(parsed, dict) and isinstance(parsed.get("cookies"), dict):
+                cookies = {str(k): str(v) for k, v in parsed["cookies"].items()}
             elif isinstance(parsed, dict):
-                cookies = {str(k): str(v) for k, v in parsed.items()}
+                cookies = {str(k): str(v) for k, v in parsed.items() if k != "access_token"}
 
         return cls(
             team_id=int(team_id) if team_id else None,
             session_cookies=cookies,
+            oidc=_oidc_from(parsed),
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
@@ -129,9 +228,13 @@ class Secrets:
         )
 
     @property
+    def access_token(self) -> str | None:
+        return self.oidc.get("access_token")
+
+    @property
     def has_session(self) -> bool:
-        """Whether a session is present. Says nothing about whether it still works."""
-        return bool(self.session_cookies)
+        """Whether credentials are present. Says nothing about whether they work."""
+        return bool(self.session_cookies) or bool(self.oidc.get("access_token"))
 
 
 @dataclass

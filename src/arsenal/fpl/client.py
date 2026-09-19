@@ -59,6 +59,7 @@ class FPLClient:
         cache_dir: Path,
         *,
         session_cookies: dict[str, str] | None = None,
+        bearer_token: str | None = None,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         raw_dir: Path | None = None,
         timeout: float = 30.0,
@@ -70,9 +71,14 @@ class FPLClient:
             raw_dir.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = ttl_seconds
         self._last_request_at = 0.0
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        if bearer_token:
+            # FPL moved to OIDC at `account.premierleague.com`, so the session
+            # may be a bearer token rather than (or as well as) a cookie.
+            headers["Authorization"] = f"Bearer {bearer_token}"
         self._client = httpx.Client(
             base_url=BASE_URL,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            headers=headers,
             cookies=session_cookies or {},
             timeout=timeout,
             follow_redirects=True,

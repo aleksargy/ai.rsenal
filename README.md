@@ -52,29 +52,45 @@ from the last good stage and every decision is reproducible from its inputs.
 
 Full design in [docs/SPEC.md](docs/SPEC.md).
 
-## The catch: there is no write API
+## Authentication: OIDC bearer tokens, not cookies
 
-This is worth knowing before you invest in the repo.
+Worth knowing before you invest in the repo, and **worth knowing if you are
+building anything else against the FPL API** — every library and guide is out of
+date on this.
 
-- `users.premierleague.com` — the login host every FPL tutorial and library still
-  documents — **no longer resolves.** Code written against it fails with DNS
-  errors, not auth errors, which is a confusing way to find out.
-- Auth moved to `account.premierleague.com`, a bot-protected SSO that returns
-  **403 to any non-browser client.** There is no scriptable credential flow.
-- Reads are wide open and unusually rich.
+Verified empirically against a live account this season:
 
-So writes replay a session harvested from a real browser. Sessions expire, and
-are partly fingerprint-bound, which makes replaying one from a CI runner the most
-likely failure point in the system.
+| | Documented everywhere | What actually works |
+|---|---|---|
+| Login host | `users.premierleague.com` | **NXDOMAIN** |
+| Credential | `pl_profile` + `sessionid` cookies | **Absent**; `ST` / `ST-NO-SS` instead |
+| Replaying cookies | Authenticates | **403** |
+| `Authorization: Bearer <token>` | Not mentioned anywhere | **Authenticates** |
 
-The executor is therefore built to degrade rather than break:
+FPL authenticates through `account.premierleague.com`, a PingOne OIDC provider.
+The browser stores its tokens in `localStorage` under
+`oidc.user:<authority>:<client_id>` — as a JSON wrapper, not a bare JWT, which is
+why a "starts with `eyJ`" scan finds nothing.
 
-1. **Direct API** with replayed cookies — fast, cheap
-2. **Playwright browser replay** — slower, survives some checks the direct call fails
-3. **Advisory** — no write; full recommendation, flagged for manual action
+**Access tokens last one hour.** A deadline run happens days after capture, so a
+stored access token is always dead. The refresh token is the durable credential,
+and `refresh_token` is a supported grant — fresh tokens are minted server-side
+with no browser involved.
 
-Full auto when the session is healthy, recommendations when it is not, and a
-Telegram message either way that says plainly which happened.
+```bash
+uv run arsenal auth attach          # read the session from your logged-in browser
+uv run arsenal auth check           # prove it authenticates
+uv run arsenal auth refresh --force # prove the refresh path works
+```
+
+Capture is manual and one-time: Google SSO blocks automated logins outright
+("This browser or app may not be secure"), so `attach` reads an already-logged-in
+Chromium over the DevTools protocol rather than driving a login. Everything after
+that runs unattended.
+
+This is a better position than the cookie model it replaced — a refresh token is
+designed to be replayed from a server, where a fingerprint-bound session cookie
+never was.
 
 ## Quick start
 
@@ -90,6 +106,7 @@ uv run arsenal plan        # solve for the optimal squad and print it
 uv run arsenal forecast    # highest expected-points players, with components
 uv run arsenal backtest    # score the forecast against completed gameweeks
 uv run arsenal research    # gather team news and show how it moves the forecast
+uv run arsenal auth check  # verify your FPL session still authenticates
 ```
 
 `plan` needs no credentials if you pass `--fresh`, which builds a squad from a

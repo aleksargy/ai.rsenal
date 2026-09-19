@@ -7,8 +7,10 @@ underneath it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import sys
 from datetime import UTC, datetime
 from itertools import zip_longest
 from typing import Annotated
@@ -17,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Column, Table
 
+from .cli_auth import auth_app
 from .config import Config
 from .forecast import build_league_model, forecast_players, load_history, upcoming_fixtures
 from .forecast.backtest import backtest as run_backtest
@@ -43,6 +46,17 @@ from .research import (
     fetch_youtube_documents,
     summarise_evidence,
 )
+from .session import authenticated_client
+
+# Windows consoles default to cp1252, which cannot encode several characters
+# this CLI prints — the typographic minus in "T−72h", the middot separators, the
+# em dashes. Without this, `arsenal doctor` dies with a UnicodeEncodeError on a
+# stock PowerShell, which looks like a crash in the tool rather than a terminal
+# limitation. `errors="replace"` means an unrenderable glyph degrades to a
+# placeholder instead of taking the command down.
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError, OSError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 app = typer.Typer(
     name="arsenal",
@@ -51,15 +65,16 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+app.add_typer(auth_app, name="auth")
 
 
 def _client(config: Config, *, gameweek: int | None = None) -> FPLClient:
-    raw_dir = config.run_dir(gameweek) / "raw" if gameweek is not None else None
-    return FPLClient(
-        config.cache_dir,
-        session_cookies=config.secrets.session_cookies or None,
-        raw_dir=raw_dir,
-    )
+    """A client that authenticates when it can and reads publicly when it cannot.
+
+    `required=False` because every read endpoint works without a session — a
+    missing credential should cost you your own squad, not the whole CLI.
+    """
+    return authenticated_client(config, gameweek=gameweek, required=False)
 
 
 @app.callback()

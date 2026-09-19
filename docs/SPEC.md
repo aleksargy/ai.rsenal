@@ -30,25 +30,29 @@ and differentials; this system optimises for expected points and consistency.
 
 ## 3. Hard constraints
 
-### 3.1 There is no write API
+### 3.1 Authentication is OIDC, not cookies
 
-This is the defining constraint and it shapes the whole design.
+**Resolved, and better than this spec originally assumed.** Verified empirically
+against a live account rather than taken from documentation:
 
-- `users.premierleague.com` — the login host every FPL library and tutorial
-  still documents — **no longer resolves**. Code written against it fails with
-  DNS errors.
-- Auth moved to `account.premierleague.com`, a bot-protected SSO returning
-  **403 to any non-browser client**. There is no scriptable credential flow.
-- `/api/my-team/{id}/` returns **403** unauthenticated.
-- Reads are fully open and unusually rich.
+- `users.premierleague.com` — the login host every FPL library still targets —
+  **no longer resolves**.
+- The documented `pl_profile` / `sessionid` cookies **do not exist**. `ST` and
+  `ST-NO-SS` appear instead, and **replaying them returns 403**.
+- FPL authenticates through `account.premierleague.com` (a PingOne OIDC
+  provider). `Authorization: Bearer <access_token>` **authenticates**.
+- Access tokens live **one hour**, so a stored one is always dead by the next
+  deadline. The `refresh_token` grant is supported, so fresh tokens can be minted
+  server-side with no browser.
 
-**Consequence:** authenticated state must be harvested from a real browser and
-replayed. Sessions expire — assume weeks — and are partly fingerprint-bound, so a
-session minted on a desktop and replayed from a GitHub Actions runner in another
-country is **the single most likely failure point in the system.**
+**Consequence:** the original fear — that a session bound to a browser
+fingerprint would break when replayed from a GitHub Actions runner — largely
+evaporates. A refresh token is a first-class credential *designed* to be replayed
+from a server. Capture is still manual and browser-based (Google SSO blocks
+automated logins outright), but it is a one-time step, not a per-run one.
 
-The design treats session expiry as a *normal operating condition with a defined
-recovery path*, never as an exception. See §6.6.
+What remains genuinely unknown is the **write payload shape**, not the
+credential. See §10.
 
 ### 3.2 Everything else
 
@@ -249,8 +253,10 @@ The repo becomes the decision log.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Session expires mid-season | **High** | Three-layer degradation; advisory keeps working; explicit re-seed flow |
-| Fingerprint binding blocks CI writes | **High** | Browser layer; if persistently blocked, move execute to a local runner and keep research in CI |
+| ~~Session expires mid-season~~ | **Resolved** | Refresh token mints new access tokens server-side; no browser needed per run |
+| ~~Fingerprint binding blocks CI writes~~ | **Resolved** | Bearer tokens are not fingerprint-bound; a refresh token is designed for server replay |
+| Refresh token revoked or rotated away | Medium | Rotated tokens are written back on every refresh; revocation degrades to advisory with a re-capture prompt |
+| Write payload shape wrong | **High** | Reconstructed, not verified. Must be diffed against a real browser submission before the first live write |
 | API shape change | Medium | Defensive parse, raw payload persistence, `doctor` drift check |
 | Bad forecast → bad transfer | Medium | Risk adjustment, `max_hit` bound, T−24h provisional notification |
 | Scraper breakage | Low | Adapters degrade to empty; abort only past half-failed |
@@ -281,12 +287,15 @@ something already useful.
 
 ## 10. Open questions
 
-- **Are the write payload shapes correct?** Reconstructed from browser network
-  calls, not independently verified. Must be confirmed by diffing `arsenal
-  execute --dry-run` against a real browser submission before the first live run.
+- **Are the write payload shapes correct?** Reconstructed, not verified — and
+  now the single biggest open risk, since auth is settled. Must be confirmed by
+  diffing `arsenal execute --dry-run` against a real browser submission before
+  the first live run. Note the write may also need the bearer token rather than
+  cookies, which no documentation covers.
 - **Are the DC thresholds still 10/12?** Confirmed as 2 points and GKP-excluded
   from `game_config`; the thresholds are engine-side and not exposed. Validate
   empirically against observed awards.
-- **Will a CI-replayed session hold?** Unknown until tested across several
-  gameweeks. Determines whether execution can stay in Actions.
+- **How long does the refresh token itself live?** Unknown. It survives access
+  token expiry, but whether it lasts a season or a month determines how often a
+  manual re-capture is needed.
 - Backtest methodology and what xP accuracy is good enough to trust unattended.

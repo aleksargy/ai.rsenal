@@ -60,32 +60,86 @@ coarse pre-season editorial rating. **Prefer a difficulty measure you compute
 yourself** from opponent xG-for/xG-against form; fall back to FDR only as a prior
 in the first few gameweeks when the sample is thin.
 
-## Authentication (changed — most guides are wrong)
+## Authentication — bearer tokens, not cookies
 
-**`users.premierleague.com` no longer resolves.** Every tutorial, and every
-release of the `fpl` Python library, posts credentials to
-`https://users.premierleague.com/accounts/login/`. That host is dead (NXDOMAIN).
-Code written against it fails with a DNS error, not an auth error, which is a
-confusing way to discover this.
+**Every FPL guide, tutorial and library is wrong about this.** Verified
+empirically against a live logged-in account, 2026/27 season:
 
-Identity now lives at `account.premierleague.com`, which is a bot-protected SSO
-that returns **403 to any non-browser client**. There is no username/password
-flow you can drive from `requests` or `httpx`.
+| | What is documented everywhere | What actually works |
+|---|---|---|
+| Login host | `users.premierleague.com/accounts/login/` | **NXDOMAIN** — the host no longer resolves |
+| Credential | `pl_profile` + `sessionid` cookies | **Absent.** `ST` / `ST-NO-SS` appear instead |
+| Replaying cookies | Authenticates | **403** |
+| `Authorization: Bearer <access_token>` | Not mentioned anywhere | **Authenticates** |
 
-### What this means practically
+FPL now authenticates through **`account.premierleague.com`**, an OpenID Connect
+provider (a PingOne tenant). The browser's OIDC client stores its tokens in
+`localStorage` under a key shaped:
 
-Authenticated state must be **harvested from a real browser** and replayed:
+```
+oidc.user:https://account.premierleague.com/as:<client_id>
+```
 
-1. Log in once at `https://fantasy.premierleague.com/` in a real browser.
-2. Export the session cookies — `pl_profile` and `sessionid` are the load-bearing
-   ones — or capture a full Playwright `storage_state.json`.
-3. Store it as a secret (`FPL_SESSION_JSON` in GitHub Secrets) and replay it.
+The value is a **JSON wrapper** — `{"id_token": ..., "access_token": ...,
+"refresh_token": ..., "expires_at": ...}` — not a bare JWT, so a "does it start
+with `eyJ`" scan finds nothing. Parse it.
 
-Sessions expire. Assume weeks, not months, and treat expiry as a *normal*
-operating condition with a defined recovery path, never an exception. Cookies are
-also partly bound to client fingerprint, so a session minted on your desktop and
-replayed from a GitHub Actions runner in a different country is the most likely
-single point of failure in this whole system. Design for it to break.
+Use the **access token**, never the id token. An id token asserts who the user
+is to the client; an access token authorises API calls. Substituting one gives a
+credential that looks plausible and always 403s.
+
+### The constraint that shapes everything: one-hour tokens
+
+Access tokens carry `exp - iat = 3600`. **One hour.** A deadline run happens days
+after capture, so a stored access token is always dead on arrival. The refresh
+token is the durable credential.
+
+Discovery document (`/as/.well-known/openid-configuration`) confirms the grant:
+
+```
+token_endpoint:        https://account.premierleague.com/as/token
+grant_types_supported: [..., refresh_token, ...]
+```
+
+Refreshing needs no browser and no client secret — the client is a public SPA
+using PKCE:
+
+```http
+POST https://account.premierleague.com/as/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&refresh_token=<token>&client_id=<client_id>
+```
+
+The `client_id` is the segment after the final colon of the localStorage key, and
+also appears as a `client_id` claim inside the access token.
+
+**Write back a rotated refresh token.** Providers may issue a new one on each
+refresh; keeping the old value when none is returned is correct, but discarding a
+new one destroys the only durable credential you have.
+
+This is *better* than the cookie model it replaced. A refresh token is designed
+to be replayed from a server, where a session cookie bound to browser
+fingerprint was always going to be fragile from CI. The spec's original worry
+about sessions breaking when replayed from a GitHub Actions IP largely goes away.
+
+### Capturing a session
+
+There is no scriptable login — `account.premierleague.com` returns 403 to
+non-browser clients, and Google SSO blocks automation-controlled browsers
+outright ("This browser or app may not be secure"). So:
+
+1. Start a Chromium-based browser with `--remote-debugging-port=9222`
+   (close all its windows first, or the flag is silently ignored).
+2. Log into FPL and open **My Team**.
+3. `arsenal auth attach` reads cookies *and* localStorage over CDP.
+
+localStorage is only readable from an **open page on the origin**, so the FPL tab
+must be open when attaching.
+
+**Never gate on a cookie name.** The names changed this season with no
+announcement, and a check for the old ones rejected a working session. Capture
+everything, and let `my-team/` be the only authority on what authenticates.
 
 ### Authenticated endpoints
 
